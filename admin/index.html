@@ -1,0 +1,944 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Grapyth AI Gateway</title>
+  <link rel="stylesheet" href="/admin/admin.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <picture class="brand-picture">
+          <source media="(max-width:760px)" srcset="/admin/logo-single.png">
+          <img class="brand-logo" src="/admin/logo.png" alt="Grapyth Gateway">
+        </picture>
+      </div>
+
+      <nav class="sidebar-nav" aria-label="Gateway sections">
+        <button type="button" data-route="clients">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 4.5h13v11h-13zM6 7h8M6 10h5"/></svg>
+          <span>Clients</span><span class="nav-count" id="client-count"></span>
+        </button>
+        <button type="button" data-route="providers">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M6.5 10a3.5 3.5 0 1 1 6.7 1.4L17 15.2V17h-1.8v-1.2h-1.6v-1.6l-1.8-1.8A3.5 3.5 0 0 1 6.5 10Z"/>
+          </svg>
+          <span>Providers</span><span class="nav-count" id="provider-count"></span>
+        </button>
+        <button type="button" data-route="pricing">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 3v14M13.5 6H8.3a2.2 2.2 0 0 0 0 4.4h3.4a2.2 2.2 0 1 1 0 4.4H6.5"/>
+          </svg>
+          <span>Pricing</span><span class="nav-count" id="pricing-count"></span>
+        </button>
+        <button type="button" data-route="gateway">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path
+              d="M10 3.2 12 5l2.6-.3.7 2.5L17.5 8 17 10.6l.5 2.6-2.2.8
+                -.7 2.5-2.6-.3-2 1.8-2-1.8-2.6.3-.7-2.5-2.2-.8.5-2.6
+                L2.5 8l2.2-.8.7-2.5L8 5l2-1.8Z"
+            />
+            <circle cx="10" cy="10.5" r="2.3"/>
+          </svg>
+          <span>Gateway</span>
+        </button>
+        <button type="button" data-route="audit">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 3.5h10v13H5zM7.5 7h5M7.5 10h5M7.5 13h3"/></svg>
+          <span>Audit</span>
+        </button>
+      </nav>
+
+      <footer class="sidebar-footer">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span><strong>Admin</strong><small>Managed AI control plane</small></span>
+      </footer>
+    </aside>
+
+    <main class="workspace">
+      <header class="workspace-header">
+        <div>
+          <h1 id="view-title">Clients</h1>
+          <p id="view-description">Installation access, policy and usage</p>
+        </div>
+        <button type="button" id="view-action" class="primary">New client</button>
+      </header>
+
+      <div id="page-status" class="page-status hidden" role="status"></div>
+
+      <section id="clients-pane" class="view-pane entity-pane" data-pane="clients">
+        <aside class="entity-sidebar">
+          <label class="list-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              id="client-search"
+              type="search"
+              autocomplete="off"
+              placeholder="Search clients"
+            >
+          </label>
+          <div id="client-list" class="entity-list"></div>
+        </aside>
+        <div id="client-detail" class="entity-detail"></div>
+      </section>
+
+      <section id="providers-pane" class="view-pane entity-pane hidden" data-pane="providers">
+        <aside class="entity-sidebar">
+          <label class="list-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              id="provider-search"
+              type="search"
+              autocomplete="off"
+              placeholder="Search providers"
+            >
+          </label>
+          <div id="provider-list" class="entity-list"></div>
+        </aside>
+        <div id="provider-detail" class="entity-detail"></div>
+      </section>
+
+      <section id="pricing-pane" class="view-pane entity-pane hidden" data-pane="pricing">
+        <aside class="entity-sidebar">
+          <label class="list-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              id="pricing-search"
+              type="search"
+              autocomplete="off"
+              placeholder="Search pricing plans"
+            >
+          </label>
+          <div id="pricing-list" class="entity-list"></div>
+        </aside>
+        <div id="pricing-detail" class="entity-detail"></div>
+      </section>
+
+      <section id="gateway-pane" class="view-pane hidden" data-pane="gateway">
+        <div class="page-scroll">
+          <div class="page-content">
+            <section class="settings-card">
+              <header class="card-header">
+                <div><h2>Request limits</h2><p>Safety limits applied to every client without a restart</p></div>
+                <span class="status-badge success">Active</span>
+              </header>
+              <form id="gateway-settings-form" class="form-grid two-columns">
+                <label>
+                  Max output tokens
+                  <input
+                    id="max-output-tokens"
+                    type="number"
+                    min="1"
+                    max="128000"
+                    step="1"
+                    required
+                  >
+                  <small>Maximum tokens generated by a single request</small>
+                </label>
+                <label>
+                  Max request size (MiB)
+                  <input
+                    id="max-request-mib"
+                    type="number"
+                    min="0.001"
+                    max="100"
+                    step="0.001"
+                    required
+                  >
+                  <small>Maximum accepted JSON request body</small>
+                </label>
+                <div class="form-actions full-width"><button type="submit" class="primary">Save limits</button></div>
+              </form>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section id="audit-pane" class="view-pane hidden" data-pane="audit">
+        <div class="table-page">
+          <div class="table-toolbar">
+            <label class="list-search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                id="audit-search"
+                type="search"
+                autocomplete="off"
+                placeholder="Filter by action or target"
+              >
+            </label>
+            <span id="audit-summary" class="muted"></span>
+          </div>
+          <div id="audit-content" class="table-scroll"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="client-dialog" class="form-dialog">
+    <form id="client-form">
+      <header>
+        <div>
+          <h2>New client</h2>
+          <p>Assign an explicit provider and billing policy</p>
+        </div>
+        <button
+          type="button"
+          class="icon-button"
+          data-dialog-close
+          aria-label="Close"
+        >×</button>
+      </header>
+      <div class="dialog-body form-grid two-columns">
+        <label>
+          Client name
+          <input id="client-name" maxlength="160" required autofocus>
+        </label>
+        <label>
+          Provider credential
+          <select id="client-provider" required></select>
+        </label>
+        <label>
+          Pricing plan
+          <select id="client-plan" required></select>
+        </label>
+        <label>
+          Reasoning effort
+          <select id="client-reasoning">
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+        <label>
+          Billing mode
+          <select id="client-billing">
+            <option value="prepaid">Prepaid</option>
+            <option value="meter_only">Meter only</option>
+          </select>
+        </label>
+        <label class="full-width">
+          Contract or invoice note
+          <textarea id="client-note" rows="3" maxlength="1000"></textarea>
+        </label>
+      </div>
+      <footer>
+        <button type="button" data-dialog-close>Cancel</button>
+        <button type="submit" class="primary">Create client</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="provider-dialog" class="form-dialog compact-dialog">
+    <form id="provider-form">
+      <header>
+        <div>
+          <h2 id="provider-dialog-title">Add credential</h2>
+          <p id="provider-dialog-description">
+            The key is encrypted before it is stored.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="icon-button"
+          data-dialog-close
+          aria-label="Close"
+        >×</button>
+      </header>
+      <div class="dialog-body form-grid">
+        <label id="provider-name-field">
+          Credential name
+          <input id="provider-name" maxlength="160">
+        </label>
+        <label>
+          OpenAI API key
+          <input id="provider-key" type="password" autocomplete="off" required>
+        </label>
+      </div>
+      <footer>
+        <button type="button" data-dialog-close>Cancel</button>
+        <button type="submit" class="primary" id="provider-submit">
+          Save credential
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="provider-test-dialog" class="form-dialog compact-dialog">
+    <form id="provider-test-form">
+      <header>
+        <div>
+          <h2>Test connection</h2>
+          <p id="provider-test-name"></p>
+        </div>
+        <button
+          type="button"
+          class="icon-button"
+          data-dialog-close
+          aria-label="Close"
+        >×</button>
+      </header>
+      <div class="dialog-body form-grid">
+        <label>
+          Model
+          <input
+            id="provider-test-model"
+            required
+            placeholder="gpt-5.6-terra"
+          >
+        </label>
+        <div id="provider-test-result" class="inline-result hidden" role="status"></div>
+      </div>
+      <footer>
+        <button type="button" data-dialog-close>Close</button>
+        <button type="submit" class="primary">Run test</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="pricing-dialog" class="form-dialog wide-dialog">
+    <form id="pricing-form">
+      <header>
+        <div>
+          <h2 id="pricing-dialog-title">New pricing plan</h2>
+          <p>Rates are USD per one million tokens</p>
+        </div>
+        <button
+          type="button"
+          class="icon-button"
+          data-dialog-close
+          aria-label="Close"
+        >×</button>
+      </header>
+      <div class="dialog-body pricing-form-body">
+        <div class="form-grid three-columns">
+          <label>
+            Plan name
+            <input id="plan-name" required maxlength="160">
+          </label>
+          <label>
+            Model
+            <input id="plan-model" value="gpt-5.6-terra" required>
+          </label>
+          <label>
+            Version
+            <input id="plan-version" required maxlength="160">
+          </label>
+        </div>
+        <section class="rate-section">
+          <header>
+            <strong>Provider cost</strong>
+            <small>What the provider charges</small>
+          </header>
+          <div class="form-grid four-columns">
+            <label>
+              Input
+              <input
+                id="provider-input-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+            <label>
+              Cached input
+              <input
+                id="provider-cached-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+            <label>
+              Cache write
+              <input
+                id="provider-cache-write-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+            <label>
+              Output
+              <input
+                id="provider-output-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+          </div>
+        </section>
+        <section class="rate-section">
+          <header>
+            <strong>Client price</strong>
+            <small>What the client is billed</small>
+          </header>
+          <div class="form-grid four-columns">
+            <label>
+              Input
+              <input
+                id="billed-input-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+            <label>
+              Cached input
+              <input
+                id="billed-cached-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+            <label>
+              Cache write
+              <input
+                id="billed-cache-write-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+            <label>
+              Output
+              <input
+                id="billed-output-rate"
+                type="number"
+                min="0"
+                step="0.000001"
+                required
+              >
+            </label>
+          </div>
+        </section>
+        <label class="checkbox-row">
+          <input id="allow-below" type="checkbox">
+          <span>
+            <strong>Allow below-cost pricing</strong>
+            <small>Requires an audit reason and may produce negative margin</small>
+          </span>
+        </label>
+        <label id="below-reason-field" class="hidden">
+          Below-cost reason
+          <input id="below-reason" maxlength="500">
+        </label>
+      </div>
+      <footer>
+        <button type="button" data-dialog-close>Cancel</button>
+        <button type="submit" class="primary" id="pricing-submit">
+          Create plan
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="credit-dialog" class="form-dialog compact-dialog">
+    <form id="credit-form">
+      <header>
+        <div>
+          <h2>Adjust credit</h2>
+          <p id="credit-client-name"></p>
+        </div>
+        <button
+          type="button"
+          class="icon-button"
+          data-dialog-close
+          aria-label="Close"
+        >×</button>
+      </header>
+      <div class="dialog-body form-grid">
+        <label>
+          Amount (USD)
+          <input
+            id="credit-amount"
+            type="number"
+            step="0.000001"
+            min="-1000000"
+            max="1000000"
+            required
+          >
+        </label>
+        <label>
+          Adjustment note
+          <textarea
+            id="credit-note"
+            rows="3"
+            maxlength="1000"
+            required
+          ></textarea>
+        </label>
+      </div>
+      <footer>
+        <button type="button" data-dialog-close>Cancel</button>
+        <button type="submit" class="primary">Apply adjustment</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm-dialog">
+    <form method="dialog">
+      <header><div><h2 id="confirm-title">Confirm action</h2><p id="confirm-message"></p></div></header>
+      <footer>
+        <button value="cancel">Cancel</button>
+        <button value="confirm" id="confirm-action">Continue</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="token-dialog" class="token-dialog">
+    <div>
+      <header>
+        <div>
+          <span class="token-icon">✓</span>
+          <h2>Client token created</h2>
+          <p>Copy it now. The gateway will not show it again.</p>
+        </div>
+        <button
+          type="button"
+          class="icon-button"
+          data-dialog-close
+          aria-label="Close"
+        >×</button>
+      </header>
+      <div class="dialog-body"><code id="token-value"></code></div>
+      <footer>
+        <button type="button" data-dialog-close>Done</button>
+        <button type="button" class="primary" id="copy-token">
+          Copy token
+        </button>
+      </footer>
+    </div>
+  </dialog>
+
+  <template id="empty-state-template">
+    <div class="empty-state">
+      <span class="empty-icon" aria-hidden="true" data-empty-icon></span>
+      <strong data-empty-title></strong>
+      <p data-empty-message></p>
+      <div data-empty-action></div>
+    </div>
+  </template>
+
+  <template id="entity-row-template">
+    <button type="button" class="entity-row">
+      <span class="entity-row-head">
+        <strong data-entity-name></strong>
+        <span class="status-badge" data-entity-status></span>
+      </span>
+      <span class="entity-row-meta">
+        <span data-entity-primary></span>
+        <span data-entity-secondary></span>
+      </span>
+    </button>
+  </template>
+
+  <template id="client-detail-template">
+    <header class="detail-header">
+      <div class="detail-heading">
+        <div>
+          <h2 data-client-name></h2>
+          <span class="status-badge" data-client-status></span>
+        </div>
+        <p data-client-identity></p>
+      </div>
+      <div class="detail-actions">
+        <button type="button" data-credit-client>Adjust credit</button>
+        <button type="button" data-rotate-client-token>Rotate token</button>
+      </div>
+    </header>
+    <nav class="detail-tabs" aria-label="Client details">
+      <button type="button" data-client-section="overview">Overview</button>
+      <button type="button" data-client-section="calls">Calls</button>
+      <button type="button" data-client-section="ledger">Ledger</button>
+    </nav>
+    <div id="client-detail-content" class="detail-content"></div>
+  </template>
+
+  <template id="client-overview-template">
+    <section class="metric-grid">
+      <span class="metric-card">
+        <small>Balance</small>
+        <strong data-client-balance></strong>
+      </span>
+      <span class="metric-card">
+        <small>Successful calls</small>
+        <strong data-client-call-count></strong>
+      </span>
+      <span class="metric-card">
+        <small>Billed</small>
+        <strong data-client-billed></strong>
+      </span>
+      <span class="metric-card">
+        <small>Margin</small>
+        <strong data-client-margin></strong>
+      </span>
+    </section>
+
+    <section class="settings-card">
+      <header class="card-header">
+        <div>
+          <h3>Client configuration</h3>
+          <p>Every policy value is assigned directly to this installation</p>
+        </div>
+      </header>
+      <form id="client-policy-form" class="form-grid two-columns">
+        <label>
+          Client name
+          <input name="name" maxlength="160" required>
+        </label>
+        <label>
+          Provider credential
+          <select name="providerCredentialId"></select>
+        </label>
+        <label>
+          Pricing plan
+          <select name="pricingPlanId" required></select>
+        </label>
+        <label>
+          Reasoning effort
+          <select name="reasoningEffort">
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+        <label>
+          Billing mode
+          <select name="billingMode">
+            <option value="prepaid">Prepaid</option>
+            <option value="meter_only">Meter only</option>
+          </select>
+        </label>
+        <label class="full-width">
+          Contract or invoice note
+          <textarea name="note" rows="3" maxlength="1000"></textarea>
+        </label>
+        <div class="form-actions full-width">
+          <button type="button" data-test-client-connection>
+            Test connection
+          </button>
+          <button type="submit" class="primary">Save changes</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="content-card danger-zone">
+      <header class="card-header">
+        <div>
+          <h3>Access controls</h3>
+          <p>Operational actions that immediately affect this client</p>
+        </div>
+      </header>
+      <div class="danger-zone-row">
+        <div>
+          <strong data-client-access-title></strong>
+          <small data-client-access-message></small>
+        </div>
+        <button type="button" data-toggle-client></button>
+      </div>
+    </section>
+
+    <section class="content-card">
+      <header class="card-header">
+        <div>
+          <h3>Assigned resources</h3>
+          <p>Current resolved configuration</p>
+        </div>
+      </header>
+      <div class="provider-facts">
+        <span>
+          <small>Provider</small>
+          <strong data-client-provider></strong>
+        </span>
+        <span>
+          <small>Plan</small>
+          <strong data-client-plan></strong>
+        </span>
+        <span>
+          <small>Model</small>
+          <strong data-client-model></strong>
+        </span>
+        <span>
+          <small>Pricing version</small>
+          <strong data-client-pricing-version></strong>
+        </span>
+      </div>
+    </section>
+  </template>
+
+  <template id="client-calls-template">
+    <section class="content-card">
+      <header class="card-header">
+        <div>
+          <h3>Recent calls</h3>
+          <p>Token usage and gateway billing metadata</p>
+        </div>
+      </header>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Status</th>
+              <th>Model / reasoning</th>
+              <th>Tokens in / out</th>
+              <th>Provider</th>
+              <th>Billed</th>
+              <th>Margin</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </template>
+
+  <template id="client-call-row-template">
+    <tr>
+      <td data-call-time></td>
+      <td>
+        <span class="status-badge" data-call-status></span>
+        <span class="status-badge warning" data-call-below-cost>
+          Below cost
+        </span>
+      </td>
+      <td>
+        <span data-call-model></span><br>
+        <small data-call-reasoning></small>
+      </td>
+      <td data-call-tokens></td>
+      <td data-call-provider-cost></td>
+      <td data-call-billed></td>
+      <td data-call-margin></td>
+    </tr>
+  </template>
+
+  <template id="client-ledger-template">
+    <section class="content-card">
+      <header class="card-header">
+        <div>
+          <h3>Credit ledger</h3>
+          <p>Manual adjustments and usage charges</p>
+        </div>
+      </header>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Kind</th>
+              <th>Amount</th>
+              <th>Note</th>
+              <th>Call</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </template>
+
+  <template id="client-ledger-row-template">
+    <tr>
+      <td data-ledger-time></td>
+      <td data-ledger-kind></td>
+      <td data-ledger-amount></td>
+      <td data-ledger-note></td>
+      <td><code data-ledger-call></code></td>
+    </tr>
+  </template>
+
+  <template id="provider-detail-template">
+    <header class="detail-header">
+      <div class="detail-heading">
+        <div>
+          <h2 data-provider-name></h2>
+          <span class="status-badge" data-provider-status></span>
+        </div>
+        <p data-provider-id></p>
+      </div>
+      <div class="detail-actions">
+        <button type="button" data-test-provider>Test connection</button>
+        <button type="button" data-rotate-provider>Rotate key</button>
+      </div>
+    </header>
+    <div class="detail-content">
+      <section class="settings-card">
+        <header class="card-header">
+          <div>
+            <h3>Credential details</h3>
+            <p>The API key remains encrypted and is never returned to the browser</p>
+          </div>
+        </header>
+        <div class="provider-facts">
+          <span>
+            <small>Stored key</small>
+            <strong data-provider-key-hint></strong>
+          </span>
+          <span>
+            <small>Status</small>
+            <strong data-provider-detail-status></strong>
+          </span>
+          <span>
+            <small>Created</small>
+            <strong data-provider-created></strong>
+          </span>
+          <span>
+            <small>Updated</small>
+            <strong data-provider-updated></strong>
+          </span>
+        </div>
+      </section>
+      <section class="content-card danger-zone">
+        <header class="card-header">
+          <div>
+            <h3>Access controls</h3>
+            <p>Disabling this credential blocks clients assigned to it</p>
+          </div>
+        </header>
+        <div class="danger-zone-row">
+          <div>
+            <strong data-provider-access-title></strong>
+            <small data-provider-access-message></small>
+          </div>
+          <button type="button" data-toggle-provider></button>
+        </div>
+      </section>
+    </div>
+  </template>
+
+  <template id="pricing-detail-template">
+    <header class="detail-header">
+      <div class="detail-heading">
+        <div>
+          <h2 data-plan-name></h2>
+          <span class="status-badge" data-plan-status></span>
+          <span class="status-badge warning" data-plan-below-cost>
+            Below cost
+          </span>
+        </div>
+        <p data-plan-identity></p>
+      </div>
+      <div class="detail-actions">
+        <button type="button" data-edit-plan>Edit plan</button>
+      </div>
+    </header>
+    <div class="detail-content">
+      <section class="settings-card">
+        <header class="card-header">
+          <div>
+            <h3>Plan details</h3>
+            <p>Versioned pricing assigned explicitly to gateway clients</p>
+          </div>
+        </header>
+        <div class="provider-facts">
+          <span>
+            <small>Model</small>
+            <strong data-plan-model></strong>
+          </span>
+          <span>
+            <small>Version</small>
+            <strong data-plan-version></strong>
+          </span>
+          <span>
+            <small>Created</small>
+            <strong data-plan-created></strong>
+          </span>
+          <span>
+            <small>Updated</small>
+            <strong data-plan-updated></strong>
+          </span>
+        </div>
+      </section>
+      <section class="content-card">
+        <header class="card-header">
+          <div>
+            <h3>Provider cost / 1M tokens</h3>
+            <p>What the provider charges the gateway</p>
+          </div>
+        </header>
+        <div class="rate-facts" data-provider-rate-facts></div>
+      </section>
+      <section class="content-card">
+        <header class="card-header">
+          <div>
+            <h3>Client price / 1M tokens</h3>
+            <p>What the client is billed for usage</p>
+          </div>
+        </header>
+        <div class="rate-facts" data-billed-rate-facts></div>
+      </section>
+      <section class="content-card" data-below-cost-section>
+        <header class="card-header">
+          <div>
+            <h3>Below-cost approval</h3>
+            <p></p>
+          </div>
+          <span class="status-badge warning">Approved</span>
+        </header>
+      </section>
+      <section class="content-card danger-zone">
+        <header class="card-header">
+          <div>
+            <h3>Availability</h3>
+            <p>Disabled plans cannot be assigned to new clients</p>
+          </div>
+        </header>
+        <div class="danger-zone-row">
+          <div>
+            <strong data-plan-access-title></strong>
+            <small data-plan-access-message></small>
+          </div>
+          <button type="button" data-toggle-plan></button>
+        </div>
+      </section>
+    </div>
+  </template>
+
+  <template id="rate-fact-template">
+    <span>
+      <small></small>
+      <strong></strong>
+    </span>
+  </template>
+
+  <template id="audit-table-template">
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Action</th>
+          <th>Target</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </template>
+
+  <template id="audit-row-template">
+    <tr>
+      <td data-audit-time></td>
+      <td><strong data-audit-action></strong></td>
+      <td>
+        <span data-audit-target-type></span><br>
+        <code data-audit-target-id></code>
+      </td>
+      <td><pre class="audit-details" data-audit-details></pre></td>
+    </tr>
+  </template>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/admin/admin.js"></script>
+</body>
+</html>

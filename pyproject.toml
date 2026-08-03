@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grapyth-ai-gateway"
+version = "0.1.0"
+description = "Lightweight self-hosted gateway for AI provider policy and accounting"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "Apache-2.0"
+dynamic = ["dependencies"]
+
+[project.optional-dependencies]
+test = [
+    "playwright==1.60.0",
+    "pytest==9.1.0",
+]
+
+[tool.setuptools]
+packages = [
+    "gateway",
+    "gateway.api",
+    "gateway.persistence",
+    "gateway.providers",
+    "gateway.services",
+    "gateway.stores",
+]
+package-dir = { gateway = "." }
+include-package-data = true
+
+[tool.setuptools.package-data]
+gateway = ["admin/*.css", "admin/*.html", "admin/*.js", "admin/*.png"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
