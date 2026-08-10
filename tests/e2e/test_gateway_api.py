@@ -216,7 +216,9 @@ async def test_admin_provisions_credit_and_client_calls_managed_ai(tmp_path: Pat
         )
         admin_css = authenticated_assets["admin.css"]
         admin_js = authenticated_assets["admin.js"]
-        assert "--primary:#9bbcff" in admin_css.text
+        assert "--bg:#16181c" in admin_css.text
+        assert "--accent:#8eb2ff" in admin_css.text
+        assert "--accent2:#ff6c8c" in admin_css.text
         assert "/admin/api/defaults" not in admin_js.text
         for logo_name in ("logo.png", "logo-single.png"):
             admin_logo = authenticated_assets[logo_name]

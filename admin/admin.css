@@ -1,17 +1,28 @@
 :root {
   color-scheme:dark;
-  --bg:#090c13;
-  --surface:#101620;
-  --surface-2:#151d2a;
-  --surface-3:#1a2433;
-  --line:#293548;
-  --text:#dbe4f3;
-  --strong:#f5f8ff;
-  --muted:#8f9bb0;
-  --primary:#9bbcff;
-  --danger:#ff7794;
-  --success:#7fd49a;
-  --warning:#f0c96a;
+  --bg:#16181c;
+  --surface:#1a1b1f;
+  --surface2:#202125;
+  --border:#303136;
+  --text:#e1e4ed;
+  --text2:#8b90a0;
+  --accent:#8eb2ff;
+  --accent2:#ff6c8c;
+  --green:#63a482;
+  --yellow:#f0c456;
+  --orange:#f09c56;
+  --red:#ff6c6c;
+  --cyan:#56d4f0;
+  --purple:#b56cff;
+  --surface-2:var(--surface2);
+  --surface-3:color-mix(in srgb,var(--surface2) 82%,var(--border));
+  --line:var(--border);
+  --strong:var(--text);
+  --muted:var(--text2);
+  --primary:var(--accent);
+  --success:var(--green);
+  --warning:var(--yellow);
+  --danger:var(--red);
   --sidebar-width:286px;
   --entity-sidebar-width:316px;
   font:13px/1.45 Inter,"Segoe UI",system-ui,sans-serif;
@@ -71,7 +82,7 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 button.primary {
   border-color:var(--primary);
   background:var(--primary);
-  color:#0a1019;
+  color:var(--bg);
   font-weight:700;
 }
 
@@ -95,7 +106,7 @@ textarea {
 }
 
 input::placeholder,textarea::placeholder {
-  color:#667389;
+  color:color-mix(in srgb,var(--muted) 72%,var(--bg));
 }
 
 h1,h2,h3,h4,p {
@@ -322,7 +333,7 @@ small,.muted {
   padding:0 8px;
   border:1px solid var(--line);
   border-radius:5px;
-  background:#0b1019;
+  background:var(--bg);
   color:var(--muted);
 }
 
@@ -801,7 +812,7 @@ dialog {
   max-height:min(90vh,820px);
   padding:0;
   overflow:hidden;
-  border:1px solid #3b4962;
+  border:1px solid color-mix(in srgb,var(--line) 76%,var(--text));
   border-radius:9px;
   background:var(--surface);
   color:var(--text);
@@ -809,7 +820,7 @@ dialog {
 }
 
 dialog::backdrop {
-  background:#03050ab8;
+  background:color-mix(in srgb,var(--bg) 72%,transparent);
   backdrop-filter:blur(2px);
 }
 
@@ -951,7 +962,7 @@ dialog footer {
   overflow-wrap:anywhere;
   border:1px solid var(--line);
   border-radius:6px;
-  background:#080d15;
+  background:var(--bg);
   color:var(--primary);
   font:12px/1.55 Consolas,"IBM Plex Mono",monospace;
   user-select:all;

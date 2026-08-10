@@ -50,8 +50,24 @@ def test_gateway_admin_uses_grapyth_sidebar_and_separate_views() -> None:
     assert "brand-mark-placeholder" not in html
     assert 'href="/admin/admin.css"' in html
     assert 'type="module" src="/admin/admin.js"' in html
-    assert "--bg:#090c13" in css
-    assert "--primary:#9bbcff" in css
+    expected_palette = {
+        "bg": "#16181c",
+        "surface": "#1a1b1f",
+        "surface2": "#202125",
+        "border": "#303136",
+        "text": "#e1e4ed",
+        "text2": "#8b90a0",
+        "accent": "#8eb2ff",
+        "accent2": "#ff6c8c",
+        "green": "#63a482",
+        "yellow": "#f0c456",
+        "orange": "#f09c56",
+        "red": "#ff6c6c",
+        "cyan": "#56d4f0",
+        "purple": "#b56cff",
+    }
+    for name, value in expected_palette.items():
+        assert f"--{name}:{value}" in css
     assert "--sidebar-width:286px" in css
     assert ".brand-logo" in css
     assert ".entity-pane" in css
