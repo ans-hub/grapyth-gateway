@@ -595,6 +595,15 @@ small,.muted {
   color:var(--danger);
 }
 
+.call-error {
+  display:block;
+  max-width:24ch;
+  margin-top:5px;
+  overflow-wrap:anywhere;
+  color:var(--danger);
+  font-size:11px;
+}
+
 .form-grid {
   display:grid;
   gap:11px;

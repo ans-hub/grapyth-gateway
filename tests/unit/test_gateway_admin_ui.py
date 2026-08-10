@@ -172,6 +172,7 @@ def test_gateway_admin_uses_accessible_dialogs() -> None:
 
 
 def test_dynamic_admin_values_use_dom_text_boundaries() -> None:
+    html = (ADMIN / "index.html").read_text(encoding="utf-8")
     scripts = javascript_source()
     ui = (ADMIN / "ui.js").read_text(encoding="utf-8")
 
@@ -183,6 +184,9 @@ def test_dynamic_admin_values_use_dom_text_boundaries() -> None:
     assert "textContent" in scripts
     assert "replaceChildren" in scripts
     assert 'document.getElementById("token-value").textContent = ""' in ui
+    assert 'data-call-error' in html
+    assert "formatDiagnosticCode" not in scripts
+    assert "error.textContent = call.error_code" in scripts
 
 
 def test_screen_create_actions_have_one_owner() -> None:

@@ -226,6 +226,9 @@ function renderCalls(target) {
     const status = rowFragment.querySelector("[data-call-status]");
     status.textContent = call.status;
     status.classList.add(call.status === "ok" ? "success" : "danger");
+    const error = rowFragment.querySelector("[data-call-error]");
+    error.textContent = call.error_code;
+    error.classList.toggle("hidden", !call.error_code);
     rowFragment
       .querySelector("[data-call-below-cost]")
       .classList.toggle("hidden", !call.below_cost);

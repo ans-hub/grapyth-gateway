@@ -113,6 +113,30 @@ def gateway_admin_server(tmp_path: Path):
                 duration_ms=100 + index,
             )
         )
+    failed_call = accounting.begin_call(
+        CallStart(
+            installation_id=installation.id,
+            idempotency_key="layout-provider-failure",
+            requested_model=default_plan.model,
+        )
+    )
+    accounting.complete_call(
+        CallCompletion(
+            call_id=failed_call.id,
+            status="error",
+            resolved_model=default_plan.model,
+            reasoning_effort="low",
+            pricing=PricingSnapshot(
+                plan_id=default_plan.id,
+                version=default_plan.version,
+                provider_rates=default_plan.provider_rates,
+                billed_rates=default_plan.billed_rates,
+                below_cost=default_plan.below_cost,
+            ),
+            error_code="RateLimitError",
+            duration_ms=120,
+        )
+    )
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -277,7 +301,8 @@ def test_every_route_stays_in_the_bounded_workspace_row_with_tall_content(
             assert_active_pane_fills_workspace("#clients-pane", "#clients-pane .entity-sidebar")
 
             page.locator('[data-client-section="calls"]').click()
-            expect(page.locator("#client-detail-content tbody tr")).to_have_count(30)
+            expect(page.locator("#client-detail-content tbody tr")).to_have_count(31)
+            expect(page.locator('[data-call-error]:text-is("RateLimitError")')).to_be_visible()
             assert_active_pane_fills_workspace("#clients-pane", "#clients-pane .entity-sidebar")
 
             page.locator('[data-client-section="ledger"]').click()
