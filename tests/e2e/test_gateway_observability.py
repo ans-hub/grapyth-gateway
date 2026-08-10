@@ -10,6 +10,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from gateway.domain import ProviderRequest, ProviderResult
+from gateway.providers.base import ProviderRequestError
 from gateway.server import GatewaySettings, create_app
 from gateway.services.calls import LOGGER
 
@@ -136,6 +137,132 @@ async def test_gateway_correlates_early_errors_and_provider_calls_without_payloa
     assert "installation-secret-must-not-be-logged" not in rendered_logs
     assert "private denied payload" not in rendered_logs
     assert "private accepted payload" not in rendered_logs
+
+
+@pytest.mark.anyio
+async def test_provider_quota_error_is_safe_and_has_no_retry_guidance(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    class QuotaLimitedProvider(Provider):
+        @staticmethod
+        def invoke(_request: ProviderRequest) -> ProviderResult:
+            raise ProviderRequestError(
+                error_code="credit_balance_exhausted",
+                error_type="insufficient_quota",
+                status_code=429,
+                request_id="req-provider-credit-e2e",
+                retry_after_seconds=9,
+            )
+
+    caplog.set_level(logging.INFO, logger=LOGGER.name)
+    app = create_app(GatewaySettings(tmp_path, "admin-secret"), QuotaLimitedProvider())
+    installation, token = app.state.configuration.create_installation("Quota client")
+    app.state.accounting.add_credit(installation.id, Decimal("10"), "gateway credit")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
+    ) as client:
+        response = await client.post(
+            "/v1/responses",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "provider-quota-e2e",
+                "X-Correlation-ID": "support-provider-quota",
+            },
+            json={
+                "input": [{"role": "user", "content": "private quota payload"}],
+                "max_output_tokens": 20,
+            },
+        )
+
+    assert response.status_code == 402
+    assert "retry-after" not in response.headers
+    error = response.json()["error"]
+    assert error == {
+        "message": "The AI provider quota is unavailable",
+        "type": "grapyth_gateway_error",
+        "code": "provider_quota_exceeded",
+        "providerErrorCode": "credit_balance_exhausted",
+        "providerErrorType": "insufficient_quota",
+        "providerStatusCode": 429,
+        "providerRequestId": "req-provider-credit-e2e",
+        "gatewayCallId": app.state.accounting.list_calls(installation.id)[0].id,
+    }
+    assert app.state.accounting.list_calls(installation.id)[0].error_code == (
+        "credit_balance_exhausted"
+    )
+
+    events = []
+    for record in caplog.records:
+        try:
+            events.append(json.loads(record.getMessage()))
+        except json.JSONDecodeError:
+            continue
+    request_event = next(
+        event
+        for event in events
+        if event.get("event") == "gateway.http_request"
+        and event.get("correlationId") == "support-provider-quota"
+    )
+    assert request_event["errorCode"] == "provider_quota_exceeded"
+    assert request_event["providerErrorCode"] == "credit_balance_exhausted"
+    assert request_event["providerErrorType"] == "insufficient_quota"
+    assert request_event["providerStatusCode"] == 429
+    assert request_event["providerRequestId"] == "req-provider-credit-e2e"
+    assert "retryAfterSeconds" not in request_event
+    ai_event = next(
+        event
+        for event in events
+        if event.get("event") == "gateway.ai_call"
+        and event.get("correlationId") == "support-provider-quota"
+    )
+    assert ai_event["errorCode"] == "provider_quota_exceeded"
+    assert ai_event["providerErrorCode"] == "credit_balance_exhausted"
+    assert "retryAfterSeconds" not in ai_event
+    rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "private quota payload" not in rendered_logs
+
+
+@pytest.mark.anyio
+async def test_provider_rate_limit_for_token_count_preserves_retry_after(
+    tmp_path: Path,
+) -> None:
+    class RateLimitedCountProvider(Provider):
+        @staticmethod
+        def count_input_tokens(_request: ProviderRequest) -> int:
+            raise ProviderRequestError(
+                error_code="rate_limit_exceeded",
+                error_type="rate_limit_error",
+                status_code=429,
+                request_id="req-provider-rate-e2e",
+                retry_after_seconds=3,
+            )
+
+    app = create_app(GatewaySettings(tmp_path, "admin-secret"), RateLimitedCountProvider())
+    installation, token = app.state.configuration.create_installation("Rate client")
+    app.state.accounting.add_credit(installation.id, Decimal("10"), "gateway credit")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
+    ) as client:
+        response = await client.post(
+            "/v1/responses",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": "provider-rate-e2e",
+            },
+            json={
+                "input": [{"role": "user", "content": "rate limited"}],
+                "max_output_tokens": 20,
+            },
+        )
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "3"
+    assert response.json()["error"]["code"] == "provider_rate_limited"
+    assert response.json()["error"]["providerErrorCode"] == "rate_limit_exceeded"
+    assert app.state.accounting.list_calls(installation.id) == []
 
 
 @pytest.mark.anyio

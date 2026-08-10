@@ -33,10 +33,30 @@ EVENT_FIELDS = {
         "durationMs",
         "providerRequestId",
         "errorCode",
+        "providerErrorCode",
+        "providerErrorType",
+        "providerStatusCode",
+        "retryAfterSeconds",
     },
     "gateway.http_request": TRACE_FIELDS
-    | {"method", "path", "status", "durationMs", "errorCode"},
-    "gateway.unhandled_error": TRACE_FIELDS | {"errorCode", "errorType", "stack"},
+    | {
+        "method",
+        "path",
+        "status",
+        "durationMs",
+        "errorCode",
+        "providerErrorCode",
+        "providerErrorType",
+        "providerStatusCode",
+        "providerRequestId",
+        "retryAfterSeconds",
+    },
+    "gateway.unhandled_error": TRACE_FIELDS
+    | {
+        "errorCode",
+        "errorType",
+        "stack",
+    },
     "gateway.provider_test": TRACE_FIELDS
     | {
         "providerCredentialId",

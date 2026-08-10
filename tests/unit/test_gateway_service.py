@@ -10,7 +10,9 @@ import threading
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
+from openai import RateLimitError
 
 from gateway.database import GatewayDatabase
 from gateway.config import DEFAULT_PRICING_VERSION, DEFAULT_RATES
@@ -28,7 +30,11 @@ from gateway.domain import (
     normalize_provider_request,
     worst_case_cost,
 )
-from gateway.providers.base import FixedProviderSelector
+from gateway.providers.base import (
+    MAX_RETRY_AFTER_SECONDS,
+    FixedProviderSelector,
+    ProviderRequestError,
+)
 from gateway.errors import GatewayError
 from gateway.providers.openai import OpenAIProvider
 from gateway.service import GatewayService
@@ -403,6 +409,47 @@ def test_provider_token_count_failure_is_safe_and_not_billable(tmp_path: Path) -
     assert accounting.balance(installation.id) == Decimal("10.000000")
 
 
+def test_provider_token_count_rate_limit_preserves_retry_guidance(tmp_path: Path) -> None:
+    class RateLimitedTokenCountProvider(RecordingProvider):
+        @staticmethod
+        def count_input_tokens(_request: ProviderRequest) -> int:
+            raise ProviderRequestError(
+                error_code="rate_limit_exceeded",
+                error_type="rate_limit_error",
+                status_code=429,
+                request_id="req-token-count-rate-limit",
+                retry_after_seconds=7,
+            )
+
+    _database, configuration, accounting, _plan = configured_stores(tmp_path)
+    installation, token = configuration.create_installation("Count rate limit")
+    accounting.add_credit(installation.id, Decimal("10"), "count rate credit")
+    service = GatewayService(
+        configuration,
+        accounting,
+        FixedProviderSelector(RateLimitedTokenCountProvider()),
+    )
+
+    with pytest.raises(GatewayError) as failed:
+        service.execute(
+            configuration.authenticate_principal(token),
+            "count-rate-limited",
+            request_payload(),
+        )
+
+    assert failed.value.status_code == 429
+    assert failed.value.code == "provider_rate_limited"
+    assert failed.value.details == {
+        "providerErrorCode": "rate_limit_exceeded",
+        "providerErrorType": "rate_limit_error",
+        "providerStatusCode": 429,
+        "providerRequestId": "req-token-count-rate-limit",
+        "retryAfterSeconds": 7,
+    }
+    assert accounting.list_calls(installation.id) == []
+    assert accounting.balance(installation.id) == Decimal("10.000000")
+
+
 def test_billed_charge_cannot_exceed_the_admitted_reserve(tmp_path: Path) -> None:
     _database, configuration, accounting, plan = configured_stores(tmp_path)
     installation, token = configuration.create_installation("Reserve cap")
@@ -512,6 +559,75 @@ def test_provider_failure_records_error_without_charging_credit(tmp_path: Path) 
     assert configuration.installation(installation.id).balance_usd == Decimal(
         "10.000000"
     )
+
+
+@pytest.mark.parametrize(
+    ("provider_error_code", "provider_error_type"),
+    [
+        ("credit_balance_exhausted", "insufficient_quota"),
+        ("organization_spend_limit_exceeded", "insufficient_quota"),
+        ("project_spend_limit_exceeded", "insufficient_quota"),
+        ("organization_usage_limit_exceeded", "insufficient_quota"),
+        ("insufficient_quota", ""),
+        ("unlisted_quota_code", "insufficient_quota"),
+    ],
+)
+def test_provider_quota_failures_are_distinct_from_a_retryable_rate_limit(
+    tmp_path: Path,
+    caplog,
+    provider_error_code: str,
+    provider_error_type: str,
+) -> None:
+    class QuotaLimitedProvider(RecordingProvider):
+        @staticmethod
+        def invoke(_request: ProviderRequest) -> ProviderResult:
+            raise ProviderRequestError(
+                error_code=provider_error_code,
+                error_type=provider_error_type,
+                status_code=429,
+                request_id="req-provider-credit",
+                retry_after_seconds=11,
+            )
+
+    caplog.set_level(logging.WARNING, logger=LOGGER.name)
+    _database, configuration, accounting, _plan = configured_stores(tmp_path)
+    installation, token = configuration.create_installation("Provider quota")
+    accounting.add_credit(installation.id, Decimal("10"), "gateway credit remains")
+    service = GatewayService(
+        configuration,
+        accounting,
+        FixedProviderSelector(QuotaLimitedProvider()),
+    )
+
+    with pytest.raises(GatewayError) as failed:
+        service.execute(
+            configuration.authenticate_principal(token),
+            "provider-quota",
+            request_payload(),
+        )
+
+    assert failed.value.status_code == 402
+    assert failed.value.code == "provider_quota_exceeded"
+    expected_details = {
+        "providerErrorCode": provider_error_code,
+        "providerStatusCode": 429,
+        "providerRequestId": "req-provider-credit",
+        "gatewayCallId": accounting.list_calls(installation.id)[0].id,
+    }
+    if provider_error_type:
+        expected_details["providerErrorType"] = provider_error_type
+    assert failed.value.details == expected_details
+    call = accounting.list_calls(installation.id)[0]
+    assert call.status == "error"
+    assert call.error_code == provider_error_code
+    assert call.charged_usd is None
+    assert accounting.balance(installation.id) == Decimal("10.000000")
+    rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert f'"providerErrorCode": "{provider_error_code}"' in rendered_logs
+    if provider_error_type:
+        assert f'"providerErrorType": "{provider_error_type}"' in rendered_logs
+    assert '"providerRequestId": "req-provider-credit"' in rendered_logs
+    assert '"retryAfterSeconds"' not in rendered_logs
 
 
 def test_parallel_calls_are_rejected_without_queueing_or_overspending_credit(tmp_path: Path) -> None:
@@ -942,6 +1058,89 @@ def test_openai_adapter_counts_the_normalized_input_without_generation_fields() 
         "reasoning": {"effort": "low"},
         "text": {"format": {"type": "text"}},
     }
+
+
+def test_openai_adapter_translates_rate_limit_errors_without_exposing_the_body() -> None:
+    sensitive_message = "Provider detail with private request content"
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"x-request-id": "req-openai-credit", "retry-after": "4.2"},
+    )
+    provider_error = RateLimitError(
+        sensitive_message,
+        response=response,
+        body={
+            "message": sensitive_message,
+            "type": "insufficient_quota",
+            "code": "credit_balance_exhausted",
+        },
+    )
+
+    class RawApi:
+        @staticmethod
+        def create(**_kwargs):
+            raise provider_error
+
+    provider = OpenAIProvider.__new__(OpenAIProvider)
+    provider.client = type(
+        "Client",
+        (),
+        {"responses": type("Responses", (), {"with_raw_response": RawApi()})()},
+    )()
+
+    with pytest.raises(ProviderRequestError) as translated:
+        provider.invoke(
+            ProviderRequest(
+                payload={"model": "gpt-5.6-terra", "input": []},
+                gateway_call_id="gw-call-provider-error",
+                fallback_model="gpt-5.6-terra",
+            )
+        )
+
+    assert str(translated.value) == "The AI provider request failed"
+    assert translated.value.error_code == "credit_balance_exhausted"
+    assert translated.value.error_type == "insufficient_quota"
+    assert translated.value.status_code == 429
+    assert translated.value.request_id == "req-openai-credit"
+    assert translated.value.retry_after_seconds == 5
+    assert sensitive_message not in str(translated.value)
+
+
+def test_provider_request_error_rejects_unsafe_diagnostics() -> None:
+    error = ProviderRequestError(
+        error_code="unsafe\nprivate payload",
+        error_type="unsafe/type",
+        status_code=True,
+        request_id="https://private.example/request",
+        retry_after_seconds=MAX_RETRY_AFTER_SECONDS + 1,
+    )
+
+    assert str(error) == "The AI provider request failed"
+    assert error.error_code == "ProviderError"
+    assert error.error_type == ""
+    assert error.status_code is None
+    assert error.request_id == ""
+    assert error.retry_after_seconds is None
+
+
+@pytest.mark.parametrize(
+    ("header_value", "expected_seconds"),
+    [
+        ("", None),
+        ("4", 4),
+        ("4.2", 5),
+        ("0", None),
+        ("nan", None),
+        (str(MAX_RETRY_AFTER_SECONDS + 1), MAX_RETRY_AFTER_SECONDS + 1),
+    ],
+)
+def test_openai_retry_after_parser_accepts_positive_delta_seconds(
+    header_value: str,
+    expected_seconds: int | None,
+) -> None:
+    assert OpenAIProvider._parse_retry_after_seconds(header_value) == expected_seconds
 
 
 def test_provider_connection_check_disables_sdk_retries_and_retrieves_selected_model() -> None:

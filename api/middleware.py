@@ -42,6 +42,7 @@ def register_request_middleware(app: FastAPI) -> None:
         request.state.board_id = safe_trace_id(request.headers.get("x-grapyth-board-id"))
         request.state.chat_id = safe_trace_id(request.headers.get("x-grapyth-chat-id"))
         request.state.error_code = ""
+        request.state.provider_error_details = {}
         try:
             response = await call_next(request)
         except Exception as exc:
@@ -83,6 +84,7 @@ def register_request_middleware(app: FastAPI) -> None:
                 "status": status,
                 "durationMs": round((time.perf_counter() - started) * 1000, 2),
                 "errorCode": request.state.error_code,
+                **request.state.provider_error_details,
             },
         )
         return response

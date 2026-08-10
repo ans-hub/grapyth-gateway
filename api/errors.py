@@ -11,6 +11,17 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(GatewayError)
     async def gateway_error_handler(request: Request, exc: GatewayError):
         request.state.error_code = exc.code
+        for detail_name in (
+            "providerErrorCode",
+            "providerErrorType",
+            "providerStatusCode",
+            "providerRequestId",
+            "retryAfterSeconds",
+        ):
+            if detail_name in exc.details:
+                request.state.provider_error_details[detail_name] = exc.details[
+                    detail_name
+                ]
         body = {
             "error": {
                 "message": str(exc),

@@ -25,11 +25,18 @@ from ..domain import (
 )
 from ..errors import DomainValidationError, GatewayError, IdempotencyConflict
 from ..observability import emit_structured_event
-from ..providers.base import ProviderPort, ProviderSelector
+from ..providers.base import ProviderPort, ProviderRequestError, ProviderSelector
 from .admission import AdmissionController
 
 
 LOGGER = logging.getLogger("uvicorn.error.grapyth.gateway")
+PROVIDER_QUOTA_ERROR_CODES = {
+    "credit_balance_exhausted",
+    "insufficient_quota",
+    "organization_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+    "project_spend_limit_exceeded",
+}
 
 
 class ManagedCallConfigurationStore(Protocol):
@@ -135,16 +142,20 @@ class ManagedCallOrchestrator:
             except GatewayError:
                 raise
             except Exception as exc:
-                self._complete_error(call, policy, trace, started, exc)
-                raise GatewayError(
-                    502,
-                    "provider_error",
-                    "The AI provider request failed",
-                    details={
-                        "gatewayCallId": call.id,
-                        "providerErrorCode": type(exc).__name__[:80],
-                    },
-                ) from exc
+                gateway_error = self._provider_gateway_error(
+                    exc,
+                    fallback_code="provider_error",
+                    fallback_message="The AI provider request failed",
+                    gateway_call_id=call.id,
+                )
+                self._complete_error(
+                    call,
+                    policy,
+                    trace,
+                    started,
+                    gateway_error,
+                )
+                raise gateway_error from exc
 
             remaining = self.accounting.balance(policy.installation_id)
             self._log_success(call, completed, policy, trace)
@@ -267,12 +278,60 @@ class ManagedCallOrchestrator:
                 raise ValueError("The provider returned a negative input token count")
             return input_tokens
         except Exception as exc:
-            raise GatewayError(
-                502,
-                "provider_token_count_error",
-                "The AI provider could not count request tokens",
-                details={"providerErrorCode": type(exc).__name__[:80]},
+            raise ManagedCallOrchestrator._provider_gateway_error(
+                exc,
+                fallback_code="provider_token_count_error",
+                fallback_message="The AI provider could not count request tokens",
             ) from exc
+
+    @staticmethod
+    def _provider_gateway_error(
+        error: Exception,
+        *,
+        fallback_code: str,
+        fallback_message: str,
+        gateway_call_id: str = "",
+    ) -> GatewayError:
+        details = ManagedCallOrchestrator._provider_error_details(error)
+        if gateway_call_id:
+            details["gatewayCallId"] = gateway_call_id
+        if isinstance(error, ProviderRequestError):
+            if (
+                error.error_code.lower() in PROVIDER_QUOTA_ERROR_CODES
+                or error.error_type.lower() == "insufficient_quota"
+            ):
+                details.pop("retryAfterSeconds", None)
+                return GatewayError(
+                    402,
+                    "provider_quota_exceeded",
+                    "The AI provider quota is unavailable",
+                    details=details,
+                )
+            if error.status_code == 429:
+                return GatewayError(
+                    429,
+                    "provider_rate_limited",
+                    "The AI provider is temporarily rate limited",
+                    details=details,
+                )
+        return GatewayError(502, fallback_code, fallback_message, details=details)
+
+    @staticmethod
+    def _provider_error_details(error: Exception) -> dict[str, Any]:
+        if not isinstance(error, ProviderRequestError):
+            return {"providerErrorCode": type(error).__name__[:80]}
+        details: dict[str, Any] = {
+            "providerErrorCode": error.error_code,
+        }
+        if error.error_type:
+            details["providerErrorType"] = error.error_type
+        if error.status_code is not None:
+            details["providerStatusCode"] = error.status_code
+        if error.request_id:
+            details["providerRequestId"] = error.request_id
+        if error.retry_after_seconds is not None:
+            details["retryAfterSeconds"] = error.retry_after_seconds
+        return details
 
     def _resolve_provider(self, policy: InstallationPolicy) -> ProviderPort:
         try:
@@ -330,9 +389,21 @@ class ManagedCallOrchestrator:
         policy: InstallationPolicy,
         trace: TraceContext,
         started: float,
-        error: Exception,
+        gateway_error: GatewayError,
     ) -> None:
-        error_code = type(error).__name__[:80]
+        diagnostics = {
+            key: value
+            for key, value in gateway_error.details.items()
+            if key
+            in {
+                "providerErrorCode",
+                "providerErrorType",
+                "providerStatusCode",
+                "providerRequestId",
+                "retryAfterSeconds",
+            }
+        }
+        provider_error_code = str(diagnostics["providerErrorCode"])
         self.accounting.complete_call(
             CallCompletion(
                 call_id=call.id,
@@ -341,7 +412,7 @@ class ManagedCallOrchestrator:
                 reasoning_effort=policy.reasoning_effort,
                 pricing=policy.pricing,
                 duration_ms=self._duration_ms(started),
-                error_code=error_code,
+                error_code=provider_error_code,
             )
         )
         emit_structured_event(
@@ -353,7 +424,8 @@ class ManagedCallOrchestrator:
                 "gatewayCallId": call.id,
                 "installationId": policy.installation_id,
                 "status": "error",
-                "errorCode": error_code,
+                "errorCode": gateway_error.code,
+                **diagnostics,
             },
         )
 
