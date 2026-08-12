@@ -265,6 +265,22 @@ async def test_admin_provisions_credit_and_client_calls_managed_ai(tmp_path: Pat
             "model": "gpt-5.6-terra",
             "input": [{"role": "user", "content": "private payload"}],
             "max_output_tokens": 4096,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "sample_database_query",
+                    "description": "Return a bounded database sample",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"sql": {"type": "string"}},
+                        "required": ["sql"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
             "store": True,
         }
         ai = await client.post(
@@ -277,6 +293,9 @@ async def test_admin_provisions_credit_and_client_calls_managed_ai(tmp_path: Pat
         assert ai.headers["x-grapyth-gateway-call-id"].startswith("gw-call-")
         assert provider.calls[0]["store"] is False
         assert provider.calls[0]["service_tier"] == "default"
+        assert provider.calls[0]["tools"] == request["tools"]
+        assert provider.calls[0]["tool_choice"] == "auto"
+        assert provider.calls[0]["parallel_tool_calls"] is False
 
         account = await client.get("/v1/account", headers={"Authorization": f"Bearer {token}"})
         assert account.status_code == 200

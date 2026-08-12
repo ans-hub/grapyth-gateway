@@ -10,7 +10,7 @@ from .base import ProviderRequestError
 
 
 class OpenAIProvider:
-    TOKEN_COUNT_FIELDS = {"input", "instructions", "model", "reasoning", "text"}
+    TOKEN_COUNT_FIELDS = {"input", "instructions", "model", "reasoning", "text", "tools"}
 
     def __init__(
         self,

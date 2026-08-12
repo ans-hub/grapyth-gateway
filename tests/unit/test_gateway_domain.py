@@ -145,6 +145,63 @@ def test_request_normalization_forces_gateway_policy_and_provider_non_storage() 
     )
 
 
+def test_request_normalization_allows_only_strict_serial_function_tools() -> None:
+    tool = {
+        "type": "function",
+        "name": "sample_database_query",
+        "description": "Return a bounded database sample",
+        "parameters": {
+            "type": "object",
+            "properties": {"sql": {"type": "string"}},
+            "required": ["sql"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+    normalized = normalize_provider_request(
+        {
+            "input": [{"role": "user", "content": "Inspect values"}],
+            "max_output_tokens": 100,
+            "tools": [tool],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        },
+        model="gateway-selected",
+        reasoning_effort="low",
+        max_output_tokens_limit=1024,
+    )
+
+    assert normalized["tools"] == [tool]
+    assert normalized["tool_choice"] == "auto"
+    assert normalized["parallel_tool_calls"] is False
+
+    for invalid in (
+        {"tools": [tool], "tool_choice": "auto", "parallel_tool_calls": True},
+        {
+            "tools": [{**tool, "strict": False}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        },
+        {
+            "tools": [{"type": "web_search"}],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+        },
+    ):
+        with pytest.raises(DomainValidationError):
+            normalize_provider_request(
+                {
+                    "input": [{"role": "user", "content": "Inspect values"}],
+                    "max_output_tokens": 100,
+                    **invalid,
+                },
+                model="gateway-selected",
+                reasoning_effort="low",
+                max_output_tokens_limit=1024,
+            )
+
+
 @pytest.mark.parametrize(
     ("payload", "code", "message"),
     [

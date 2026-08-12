@@ -1040,6 +1040,20 @@ def test_openai_adapter_counts_the_normalized_input_without_generation_fields() 
                 "instructions": "Be concise",
                 "reasoning": {"effort": "low"},
                 "text": {"format": {"type": "text"}},
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "sample_database_query",
+                        "description": "Return a bounded sample",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"sql": {"type": "string"}},
+                            "required": ["sql"],
+                            "additionalProperties": False,
+                        },
+                        "strict": True,
+                    }
+                ],
                 "max_output_tokens": 100,
                 "prompt_cache_key": "cache-key",
                 "prompt_cache_options": {"retention": "24h"},
@@ -1057,6 +1071,20 @@ def test_openai_adapter_counts_the_normalized_input_without_generation_fields() 
         "instructions": "Be concise",
         "reasoning": {"effort": "low"},
         "text": {"format": {"type": "text"}},
+        "tools": [
+            {
+                "type": "function",
+                "name": "sample_database_query",
+                "description": "Return a bounded sample",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"sql": {"type": "string"}},
+                    "required": ["sql"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        ],
     }
 
 

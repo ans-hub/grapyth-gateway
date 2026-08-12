@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -9,8 +11,11 @@ from .errors import DomainValidationError
 
 
 MONEY_QUANTUM = Decimal("0.000001")
-# OpenAI uses a separate long-context pricing tier above this input size.
+# Requests above this threshold require a separate long-context pricing policy.
 MAX_STANDARD_PRICING_INPUT_TOKENS = 272_000
+MAX_PROVIDER_TOOLS = 8
+MAX_PROVIDER_TOOL_SCHEMA_BYTES = 64 * 1024
+PROVIDER_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 ReasoningEffort = Literal["low", "medium", "high"]
 BillingMode = Literal["prepaid", "meter_only"]
 CallStatus = Literal["running", "ok", "error"]
@@ -377,16 +382,72 @@ def normalize_provider_request(
         "input",
         "instructions",
         "max_output_tokens",
+        "parallel_tool_calls",
         "prompt_cache_key",
         "prompt_cache_options",
         "text",
+        "tool_choice",
+        "tools",
     }
     normalized = {key: value for key, value in payload.items() if key in allowed_fields}
+    if "tools" in normalized:
+        normalized["tools"] = _normalize_provider_tools(normalized["tools"])
+        tool_choice = normalized.get("tool_choice", "auto")
+        if not isinstance(tool_choice, str) or tool_choice not in {"auto", "none"}:
+            raise DomainValidationError("tool_choice must be auto or none")
+        if normalized.get("parallel_tool_calls") is not False:
+            raise DomainValidationError("parallel_tool_calls must be false")
+        normalized["tool_choice"] = tool_choice
+        normalized["parallel_tool_calls"] = False
+    else:
+        normalized.pop("tool_choice", None)
+        normalized.pop("parallel_tool_calls", None)
     normalized["model"] = model
     normalized["reasoning"] = {"effort": reasoning_effort}
     normalized["max_output_tokens"] = min(max_output, max_output_tokens_limit)
     normalized["service_tier"] = "default"
     normalized["store"] = False
+    return normalized
+
+
+def _normalize_provider_tools(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > MAX_PROVIDER_TOOLS:
+        raise DomainValidationError(f"tools must contain between 1 and {MAX_PROVIDER_TOOLS} items")
+    normalized = []
+    allowed_fields = {"type", "name", "description", "parameters", "strict"}
+    for tool in value:
+        if not isinstance(tool, Mapping) or set(tool).difference(allowed_fields):
+            raise DomainValidationError("Each tool must be a supported function definition")
+        name = str(tool.get("name") or "")
+        description = tool.get("description")
+        parameters = tool.get("parameters")
+        if tool.get("type") != "function" or not PROVIDER_TOOL_NAME_PATTERN.fullmatch(name):
+            raise DomainValidationError("Each tool must have a valid function name")
+        if not isinstance(description, str) or not description or len(description) > 4_000:
+            raise DomainValidationError("Each tool must have a valid description")
+        if (
+            not isinstance(parameters, Mapping)
+            or parameters.get("type") != "object"
+            or parameters.get("additionalProperties") is not False
+        ):
+            raise DomainValidationError("Each tool must have an object parameter schema")
+        if tool.get("strict") is not True:
+            raise DomainValidationError("Function tools must use strict mode")
+        normalized.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": description,
+                "parameters": dict(parameters),
+                "strict": True,
+            }
+        )
+    try:
+        serialized = json.dumps(normalized, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        raise DomainValidationError("Tool definitions must be valid JSON") from exc
+    if len(serialized.encode("utf-8")) > MAX_PROVIDER_TOOL_SCHEMA_BYTES:
+        raise DomainValidationError("Tool definitions are too large")
     return normalized
 
 
