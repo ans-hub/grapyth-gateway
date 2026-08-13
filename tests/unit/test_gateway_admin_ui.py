@@ -184,9 +184,24 @@ def test_dynamic_admin_values_use_dom_text_boundaries() -> None:
     assert "textContent" in scripts
     assert "replaceChildren" in scripts
     assert 'document.getElementById("token-value").textContent = ""' in ui
-    assert 'data-call-error' in html
+    assert 'id="call-details-dialog"' in html
+    assert 'data-call-request-kind' in html
+    assert 'data-call-outcome-kind' in html
+    assert 'data-view-call-details' in html
+    assert 'data-call-margin-cell' in html
+    assert 'id="copy-call-references"' in html
+    assert 'data-call-error' not in html
+    assert 'data-call-reference-summary' not in html
     assert "formatDiagnosticCode" not in scripts
-    assert "error.textContent = call.error_code" in scripts
+    assert "call.gateway_error_code || call.error_code" in scripts
+    assert "call.failure?.provider" not in scripts
+    assert "const provider = failure.provider || {}" in scripts
+    assert 'return "Waiting for response"' in scripts
+    assert '|| "Unknown"' in scripts
+    assert 'call.status === "running"' in scripts
+    assert 'loadClientActivity("calls", isCurrent, { showLoading: false })' in scripts
+    assert "Call references copied to clipboard" in scripts
+    assert "syncOpenCallDetails" in scripts
 
 
 def test_screen_create_actions_have_one_owner() -> None:

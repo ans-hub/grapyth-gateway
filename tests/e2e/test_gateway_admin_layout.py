@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import threading
 import time
@@ -12,11 +13,13 @@ from playwright.sync_api import expect, sync_playwright
 
 from gateway.domain import (
     CallCompletion,
+    CallFailure,
     CallStart,
     PricingPlanSpec,
     PricingRates,
     PricingSnapshot,
     ProviderUsage,
+    ProviderFailure,
 )
 from gateway.server import GatewaySettings, create_app
 
@@ -86,6 +89,7 @@ def gateway_admin_server(tmp_path: Path):
                 installation_id=installation.id,
                 idempotency_key=f"layout-call-{index + 1}",
                 requested_model=default_plan.model,
+                request_kind="standard",
             )
         )
         accounting.complete_call(
@@ -110,7 +114,10 @@ def gateway_admin_server(tmp_path: Path):
                 provider_cost_usd=Decimal("0.001"),
                 charged_usd=Decimal("0.002"),
                 margin_usd=Decimal("0.001"),
+                below_cost=index == 0,
                 duration_ms=100 + index,
+                outcome_kind="tool_requested" if index == 0 else "final_response",
+                requested_tool_call_count=1 if index == 0 else 0,
             )
         )
     failed_call = accounting.begin_call(
@@ -118,6 +125,8 @@ def gateway_admin_server(tmp_path: Path):
             installation_id=installation.id,
             idempotency_key="layout-provider-failure",
             requested_model=default_plan.model,
+            app_ai_call_id="ai-layout-provider-failure",
+            request_kind="tool_continuation",
         )
     )
     accounting.complete_call(
@@ -134,6 +143,17 @@ def gateway_admin_server(tmp_path: Path):
                 below_cost=default_plan.below_cost,
             ),
             error_code="RateLimitError",
+            gateway_error_code="provider_rate_limited",
+            failure=CallFailure(
+                phase="counting_tokens",
+                kind="upstream_rejection",
+                provider=ProviderFailure(
+                    code="rate_limit_exceeded",
+                    error_type="rate_limit_error",
+                    status_code=429,
+                    param="input[4].status",
+                ),
+            ),
             duration_ms=120,
         )
     )
@@ -271,6 +291,9 @@ def test_every_route_stays_in_the_bounded_workspace_row_with_tall_content(
             viewport={"width": 1280, "height": 720},
             http_credentials={"username": "admin", "password": "admin-secret"},
         )
+        context.grant_permissions(
+            ["clipboard-read", "clipboard-write"], origin=gateway_admin_server
+        )
         page = context.new_page()
 
         def assert_active_pane_fills_workspace(pane_selector: str, sidebar_selector: str = "") -> None:
@@ -302,7 +325,55 @@ def test_every_route_stays_in_the_bounded_workspace_row_with_tall_content(
 
             page.locator('[data-client-section="calls"]').click()
             expect(page.locator("#client-detail-content tbody tr")).to_have_count(31)
-            expect(page.locator('[data-call-error]:text-is("RateLimitError")')).to_be_visible()
+            failed_row = page.locator(".calls-table tbody tr").filter(
+                has_text="provider_rate_limited"
+            )
+            expect(failed_row.locator(".call-status-column")).to_have_text("error")
+            expect(failed_row.locator("[data-call-request-kind]")).to_have_text(
+                "Tool continuation"
+            )
+            expect(failed_row.locator("[data-call-outcome-kind]")).to_have_text(
+                "provider_rate_limited"
+            )
+            expect(failed_row).not_to_contain_text("rate_limit_exceeded")
+            failed_row.locator("[data-view-call-details]").click()
+            details_dialog = page.locator("#call-details-dialog")
+            expect(details_dialog).to_be_visible()
+            expect(details_dialog).to_contain_text("ai-layout-provider-failure")
+            expect(details_dialog).to_contain_text("rate_limit_exceeded")
+            expect(details_dialog).to_contain_text("input[4].status")
+            details_dialog.locator("[data-dialog-close]").first.click()
+
+            tool_row = page.locator(".calls-table tbody tr").filter(
+                has_text="Tool requested (1)"
+            )
+            expect(tool_row.locator(".call-status-column")).to_have_text("ok")
+            expect(tool_row.locator("[data-call-request-kind]")).to_have_text("Standard")
+            expect(tool_row.locator("[data-call-outcome-kind]")).to_have_text(
+                "Tool requested (1)"
+            )
+            expect(tool_row.locator("[data-call-margin-cell]")).to_contain_text(
+                "Below cost"
+            )
+            expect(tool_row.locator(".call-status-column")).not_to_contain_text(
+                "Below cost"
+            )
+            tool_row.locator("[data-view-call-details]").click()
+            expect(details_dialog.locator("[data-call-failure-section]")).to_be_hidden()
+            details_dialog.locator("#copy-call-references").click()
+            copied = page.evaluate("navigator.clipboard.readText()")
+            assert "Gateway call: gw-call-" in copied
+            assert "Provider request: provider-layout-1" in copied
+            details_dialog.locator("[data-dialog-close]").first.click()
+
+            status_width = page.locator(
+                ".calls-table th.call-status-column"
+            ).bounding_box()["width"]
+            details_width = page.locator(
+                ".calls-table th.call-details-column"
+            ).bounding_box()["width"]
+            assert status_width < 90
+            assert details_width < 55
             assert_active_pane_fills_workspace("#clients-pane", "#clients-pane .entity-sidebar")
 
             page.locator('[data-client-section="ledger"]').click()
@@ -332,6 +403,96 @@ def test_every_route_stays_in_the_bounded_workspace_row_with_tall_content(
             }""")
             assert status_and_pane["paneTop"] == pytest.approx(status_and_pane["statusBottom"], abs=1)
             assert status_and_pane["paneBottom"] == pytest.approx(status_and_pane["workspaceBottom"], abs=1)
+        finally:
+            context.close()
+            browser.close()
+
+
+def test_running_calls_refresh_until_the_call_completes(gateway_admin_server: str) -> None:
+    requests = {"count": 0}
+
+    def serve_calls(route) -> None:
+        requests["count"] += 1
+        running = requests["count"] == 1
+        call = {
+            "id": "gw-call-live-refresh",
+            "installation_id": "layout-client",
+            "created_at": "2026-08-12T21:41:00Z",
+            "completed_at": "" if running else "2026-08-12T21:41:02Z",
+            "status": "running" if running else "ok",
+            "requested_model": "gpt-5.6-terra",
+            "resolved_model": "" if running else "gpt-5.6-terra",
+            "reasoning_effort": "" if running else "high",
+            "input_tokens": 0 if running else 120,
+            "output_tokens": 0 if running else 20,
+            "provider_cost_usd": None if running else "0.001000",
+            "charged_usd": None if running else "0.002000",
+            "margin_usd": None if running else "0.001000",
+            "below_cost": False,
+            "error_code": "",
+            "gateway_error_code": "",
+            "failure": None,
+            "app_ai_call_id": "ai-live-refresh",
+            "provider_request_id": "" if running else "provider-live-refresh",
+            "request_kind": "standard",
+            "outcome_kind": "" if running else "final_response",
+            "requested_tool_call_count": 0,
+        }
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"items": [call]}),
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(system_chromium()), headless=True
+        )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            http_credentials={"username": "admin", "password": "admin-secret"},
+        )
+        page = context.new_page()
+        page.route("**/admin/api/installations/*/calls", serve_calls)
+        try:
+            page.goto(f"{gateway_admin_server}/admin")
+            expect(page.locator("#client-list .entity-row")).to_have_count(1)
+            page.locator('[data-client-section="calls"]').click()
+
+            status = page.locator("[data-call-status]")
+            expect(status).to_have_text("running")
+            expect(page.locator("[data-call-request-kind]")).to_have_text("Standard")
+            expect(page.locator("[data-call-outcome-kind]")).to_have_text(
+                "Waiting for response"
+            )
+            page.locator("[data-view-call-details]").click()
+            details_dialog = page.locator("#call-details-dialog")
+            expect(details_dialog).to_be_visible()
+            expect(details_dialog.locator("[data-call-details-type]")).to_contain_text(
+                "Waiting for response"
+            )
+            expect(
+                details_dialog.locator('[data-call-detail-row="provider-request"]')
+            ).to_be_hidden()
+            expect(status).to_have_text("ok", timeout=5_000)
+            expect(details_dialog.locator("[data-call-details-type]")).to_contain_text(
+                "Final response"
+            )
+            expect(
+                details_dialog.locator('[data-call-detail-row="provider-request"]')
+            ).to_contain_text("provider-live-refresh")
+            details_dialog.locator("[data-dialog-close]").first.click()
+            assert requests["count"] == 2
+            page.wait_for_timeout(2_500)
+            assert requests["count"] == 2
+
+            requests["count"] = 0
+            page.locator('[data-client-section="ledger"]').click()
+            page.locator('[data-client-section="calls"]').click()
+            expect(status).to_have_text("running")
+            page.locator('[data-client-section="ledger"]').click()
+            page.wait_for_timeout(2_500)
+            assert requests["count"] == 1
         finally:
             context.close()
             browser.close()

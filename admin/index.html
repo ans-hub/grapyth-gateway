@@ -520,6 +520,90 @@
     </div>
   </dialog>
 
+  <dialog
+    id="call-details-dialog"
+    class="call-details-dialog"
+    aria-labelledby="call-details-title"
+    aria-describedby="call-details-type"
+  >
+    <div>
+      <header>
+        <div>
+          <h2 id="call-details-title">Call details</h2>
+          <p id="call-details-type" data-call-details-type></p>
+        </div>
+        <button
+          type="button"
+          class="icon-button"
+          data-dialog-close
+          aria-label="Close"
+        >&times;</button>
+      </header>
+      <div class="dialog-body call-details-body">
+        <section class="call-details-section" data-call-references-section>
+          <h3>References</h3>
+          <dl class="call-details-grid">
+            <div data-call-detail-row="gateway-call">
+              <dt>Gateway call</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="app-ai-call">
+              <dt>App AI call</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="provider-request">
+              <dt>Provider request</dt>
+              <dd></dd>
+            </div>
+          </dl>
+        </section>
+        <section class="call-details-section hidden" data-call-failure-section>
+          <h3>Failure diagnostics</h3>
+          <dl class="call-details-grid">
+            <div data-call-detail-row="gateway-error">
+              <dt>Gateway error</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="failure-phase">
+              <dt>Phase</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="failure-kind">
+              <dt>Classification</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="provider-code">
+              <dt>Provider code</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="provider-type">
+              <dt>Provider type</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="provider-status">
+              <dt>Provider status</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="provider-param">
+              <dt>Provider parameter</dt>
+              <dd></dd>
+            </div>
+            <div data-call-detail-row="provider-retry">
+              <dt>Retry after</dt>
+              <dd></dd>
+            </div>
+          </dl>
+        </section>
+      </div>
+      <footer>
+        <button type="button" data-dialog-close>Close</button>
+        <button type="button" class="primary" id="copy-call-references">
+          Copy references
+        </button>
+      </footer>
+    </div>
+  </dialog>
+
   <template id="empty-state-template">
     <div class="empty-state">
       <span class="empty-icon" aria-hidden="true" data-empty-icon></span>
@@ -685,16 +769,18 @@
         </div>
       </header>
       <div class="table-scroll">
-        <table>
+        <table class="calls-table">
           <thead>
             <tr>
               <th>Time</th>
-              <th>Status</th>
+              <th class="call-status-column">Status</th>
+              <th>Type</th>
               <th>Model / reasoning</th>
               <th>Tokens in / out</th>
               <th>Provider</th>
               <th>Billed</th>
               <th>Margin</th>
+              <th class="call-details-column" aria-label="Details"></th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -706,12 +792,12 @@
   <template id="client-call-row-template">
     <tr>
       <td data-call-time></td>
-      <td>
+      <td class="call-status-column">
         <span class="status-badge" data-call-status></span>
-        <span class="status-badge warning" data-call-below-cost>
-          Below cost
-        </span>
-        <span class="call-error hidden" data-call-error></span>
+      </td>
+      <td class="call-type-cell">
+        <strong data-call-request-kind></strong>
+        <small data-call-outcome-kind></small>
       </td>
       <td>
         <span data-call-model></span><br>
@@ -720,7 +806,20 @@
       <td data-call-tokens></td>
       <td data-call-provider-cost></td>
       <td data-call-billed></td>
-      <td data-call-margin></td>
+      <td data-call-margin-cell>
+        <span data-call-margin></span>
+        <span class="status-badge warning call-margin-warning" data-call-below-cost>
+          Below cost
+        </span>
+      </td>
+      <td class="call-details-column">
+        <button
+          type="button"
+          class="icon-button call-details-button"
+          data-view-call-details
+          title="View call details"
+        ><span aria-hidden="true">&#128269;</span></button>
+      </td>
     </tr>
   </template>
 

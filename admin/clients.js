@@ -17,6 +17,8 @@ const clientDetailElement = document.getElementById("client-detail");
 const clientSearchElement = document.getElementById("client-search");
 const clientDialog = document.getElementById("client-dialog");
 const creditDialog = document.getElementById("credit-dialog");
+const callDetailsDialog = document.getElementById("call-details-dialog");
+const RUNNING_CALL_REFRESH_MS = 2_000;
 
 const clientState = {
   clients: [],
@@ -30,6 +32,44 @@ const clientState = {
 
 let navigateTo;
 let reloadCurrentRoute;
+let callsRefreshTimer = null;
+let selectedCallDetailsId = "";
+let callDetailsReferenceText = "";
+
+function clientsPaneIsVisible() {
+  return !clientDetailElement.closest("[data-pane]")?.classList.contains("hidden");
+}
+
+function stopCallsRefresh() {
+  if (callsRefreshTimer !== null) {
+    clearTimeout(callsRefreshTimer);
+    callsRefreshTimer = null;
+  }
+}
+
+function scheduleCallsRefresh(isCurrent) {
+  stopCallsRefresh();
+  if (
+    !isCurrent() ||
+    !clientsPaneIsVisible() ||
+    clientState.section !== "calls" ||
+    !clientState.calls?.some((call) => call.status === "running")
+  ) {
+    return;
+  }
+
+  callsRefreshTimer = setTimeout(() => {
+    callsRefreshTimer = null;
+    if (
+      !isCurrent() ||
+      !clientsPaneIsVisible() ||
+      clientState.section !== "calls"
+    ) {
+      return;
+    }
+    void loadClientActivity("calls", isCurrent, { showLoading: false });
+  }, RUNNING_CALL_REFRESH_MS);
+}
 
 function selectedClient() {
   return clientState.clients.find(
@@ -47,6 +87,99 @@ function selectedProvider(client) {
   return clientState.providers.find(
     (provider) => provider.id === client?.providerCredentialId,
   ) || null;
+}
+
+function callRequestKindLabel(call) {
+  return {
+    standard: "Standard",
+    tool_continuation: "Tool continuation",
+  }[call.request_kind] || "Unknown";
+}
+
+function callOutcomeKindLabel(call) {
+  if (call.status === "running") {
+    return "Waiting for response";
+  }
+  if (call.status === "error") {
+    return call.gateway_error_code || call.error_code || "Error";
+  }
+  return {
+    final_response: "Final response",
+    tool_requested: `Tool requested (${Number(call.requested_tool_call_count || 0)})`,
+  }[call.outcome_kind] || "Unknown";
+}
+
+function setCallDetailRow(name, value) {
+  const row = callDetailsDialog.querySelector(`[data-call-detail-row="${name}"]`);
+  const visible = value !== "" && value !== null && value !== undefined;
+  row.classList.toggle("hidden", !visible);
+  row.querySelector("dd").textContent = visible ? String(value) : "";
+  return visible;
+}
+
+function renderCallDetails(call) {
+  const requestKind = callRequestKindLabel(call);
+  const outcomeKind = callOutcomeKindLabel(call);
+  callDetailsDialog.querySelector("[data-call-details-type]").textContent =
+    `${requestKind} · ${outcomeKind}`;
+
+  const references = [
+    ["Gateway call", call.id],
+    ["App AI call", call.app_ai_call_id],
+    ["Provider request", call.provider_request_id],
+  ];
+  setCallDetailRow("gateway-call", call.id);
+  setCallDetailRow("app-ai-call", call.app_ai_call_id);
+  setCallDetailRow("provider-request", call.provider_request_id);
+  callDetailsReferenceText = references
+    .filter(([, value]) => value)
+    .map(([label, value]) => `${label}: ${value}`)
+    .join("\n");
+
+  const failure = call.failure || {};
+  const provider = failure.provider || {};
+  const failureFields = [
+    ["gateway-error", call.gateway_error_code || call.error_code],
+    ["failure-phase", failure.phase],
+    ["failure-kind", failure.kind],
+    ["provider-code", provider.code],
+    ["provider-type", provider.type],
+    ["provider-status", provider.statusCode],
+    ["provider-param", provider.param],
+    [
+      "provider-retry",
+      provider.retryAfterSeconds ? `${provider.retryAfterSeconds} seconds` : "",
+    ],
+  ];
+  let failureVisible = false;
+  for (const [name, value] of failureFields) {
+    if (setCallDetailRow(name, value)) {
+      failureVisible = true;
+    }
+  }
+  callDetailsDialog
+    .querySelector("[data-call-failure-section]")
+    .classList.toggle("hidden", !failureVisible);
+}
+
+function closeCallDetails() {
+  if (callDetailsDialog.open) {
+    callDetailsDialog.close();
+  }
+}
+
+function syncOpenCallDetails() {
+  if (!callDetailsDialog.open || !selectedCallDetailsId) {
+    return;
+  }
+  const call = clientState.calls?.find(
+    (item) => item.id === selectedCallDetailsId,
+  );
+  if (!call) {
+    closeCallDetails();
+    return;
+  }
+  renderCallDetails(call);
 }
 
 function appendProviderOptions(select, selectedId = "", includeBlank = false) {
@@ -204,6 +337,7 @@ function renderCalls(target) {
   }
 
   if (!clientState.calls.length) {
+    closeCallDetails();
     target.replaceChildren(
       createEmptyState(
         "○",
@@ -225,10 +359,21 @@ function renderCalls(target) {
 
     const status = rowFragment.querySelector("[data-call-status]");
     status.textContent = call.status;
-    status.classList.add(call.status === "ok" ? "success" : "danger");
-    const error = rowFragment.querySelector("[data-call-error]");
-    error.textContent = call.error_code;
-    error.classList.toggle("hidden", !call.error_code);
+    status.classList.add(
+      call.status === "ok"
+        ? "success"
+        : call.status === "running"
+          ? "warning"
+          : "danger",
+    );
+    rowFragment.querySelector("[data-call-request-kind]").textContent =
+      callRequestKindLabel(call);
+    const outcome = rowFragment.querySelector("[data-call-outcome-kind]");
+    outcome.textContent = callOutcomeKindLabel(call);
+    outcome.classList.toggle("danger", call.status === "error");
+    const detailsButton = rowFragment.querySelector("[data-view-call-details]");
+    detailsButton.dataset.callId = call.id;
+    detailsButton.setAttribute("aria-label", `View details for ${call.id}`);
     rowFragment
       .querySelector("[data-call-below-cost]")
       .classList.toggle("hidden", !call.below_cost);
@@ -253,6 +398,7 @@ function renderCalls(target) {
   }
 
   target.replaceChildren(fragment);
+  syncOpenCallDetails();
 }
 
 function renderLedger(target) {
@@ -362,20 +508,27 @@ function renderClients() {
   renderClientDetail();
 }
 
-async function loadClientActivity(section, isCurrent = () => true) {
+async function loadClientActivity(
+  section,
+  isCurrent = () => true,
+  { showLoading = true } = {},
+) {
+  stopCallsRefresh();
   const client = selectedClient();
   if (!client || !["calls", "ledger"].includes(section)) {
     return;
   }
 
   const clientId = client.id;
-  if (section === "calls") {
+  if (showLoading && section === "calls") {
     clientState.calls = null;
   }
-  if (section === "ledger") {
+  if (showLoading && section === "ledger") {
     clientState.ledger = null;
   }
-  renderClientDetail();
+  if (showLoading) {
+    renderClientDetail();
+  }
 
   try {
     const payload = await requestAdminApi(
@@ -383,6 +536,7 @@ async function loadClientActivity(section, isCurrent = () => true) {
     );
     if (
       !isCurrent() ||
+      !clientsPaneIsVisible() ||
       clientState.selectedClientId !== clientId ||
       clientState.section !== section
     ) {
@@ -396,9 +550,20 @@ async function loadClientActivity(section, isCurrent = () => true) {
       clientState.ledger = payload.items;
     }
     renderClientDetail();
+    if (section === "calls") {
+      scheduleCallsRefresh(isCurrent);
+    }
   } catch (error) {
+    if (
+      !isCurrent() ||
+      !clientsPaneIsVisible() ||
+      clientState.selectedClientId !== clientId ||
+      clientState.section !== section
+    ) {
+      return;
+    }
     showToast(error.message, true);
-    if (clientState.selectedClientId === clientId) {
+    if (showLoading) {
       const content = document.getElementById("client-detail-content");
       content.replaceChildren(
         createEmptyState(
@@ -486,6 +651,27 @@ export function initializeClients(handlers) {
   reloadCurrentRoute = handlers.reloadCurrentRoute;
 
   clientSearchElement.addEventListener("input", renderClientList);
+  callDetailsDialog.addEventListener("close", () => {
+    selectedCallDetailsId = "";
+    callDetailsReferenceText = "";
+  });
+  document
+    .getElementById("copy-call-references")
+    .addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(callDetailsReferenceText);
+        showToast("Call references copied to clipboard");
+      } catch {
+        const selection = getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(
+          callDetailsDialog.querySelector("[data-call-references-section]"),
+        );
+        selection.removeAllRanges();
+        selection.addRange(range);
+        showToast("Call references selected. Copy them with your keyboard.");
+      }
+    });
 
   clientListElement.addEventListener("click", (event) => {
     const row = event.target.closest("[data-client-id]");
@@ -495,6 +681,8 @@ export function initializeClients(handlers) {
 
     clientState.selectedClientId = row.dataset.clientId;
     clientState.section = "overview";
+    stopCallsRefresh();
+    closeCallDetails();
     clientState.calls = null;
     clientState.ledger = null;
     renderClients();
@@ -511,8 +699,24 @@ export function initializeClients(handlers) {
       return;
     }
 
+    const callDetailsButton = event.target.closest("[data-view-call-details]");
+    if (callDetailsButton) {
+      const call = clientState.calls?.find(
+        (item) => item.id === callDetailsButton.dataset.callId,
+      );
+      if (!call) {
+        return;
+      }
+      selectedCallDetailsId = call.id;
+      renderCallDetails(call);
+      callDetailsDialog.showModal();
+      return;
+    }
+
     const sectionButton = event.target.closest("[data-client-section]");
     if (sectionButton) {
+      stopCallsRefresh();
+      closeCallDetails();
       clientState.section = sectionButton.dataset.clientSection;
       if (clientState.section === "overview") {
         renderClientDetail();
