@@ -91,6 +91,7 @@ class GatewayAccountingStore:
                     chat_id=value.chat_id[:200],
                     app_ai_call_id=value.app_ai_call_id[:200],
                     requested_model=value.requested_model[:160],
+                    request_kind=value.request_kind,
                     created_at=utc_now(),
                 )
                 record = call_repository.get(connection, call_id)
@@ -144,6 +145,11 @@ class GatewayAccountingStore:
             below_cost=value.below_cost,
             duration_ms=value.duration_ms,
             error_code=value.error_code,
+            gateway_error_code=value.gateway_error_code,
+            failure=value.failure,
+            request_kind=value.request_kind,
+            outcome_kind=value.outcome_kind,
+            requested_tool_call_count=value.requested_tool_call_count,
         )
 
     def list_calls(

@@ -16,8 +16,23 @@ TRACE_FIELDS = {
     "boardId",
     "chatId",
 }
+PROVIDER_DIAGNOSTIC_FIELDS = frozenset(
+    {
+        "providerErrorCode",
+        "providerErrorType",
+        "providerStatusCode",
+        "providerRequestId",
+        "providerErrorParam",
+        "retryAfterSeconds",
+    }
+)
+FAILURE_DIAGNOSTIC_FIELDS = PROVIDER_DIAGNOSTIC_FIELDS | {
+    "gatewayPhase",
+    "failureKind",
+}
 EVENT_FIELDS = {
     "gateway.ai_call": TRACE_FIELDS
+    | FAILURE_DIAGNOSTIC_FIELDS
     | {
         "gatewayCallId",
         "installationId",
@@ -33,23 +48,18 @@ EVENT_FIELDS = {
         "durationMs",
         "providerRequestId",
         "errorCode",
-        "providerErrorCode",
-        "providerErrorType",
-        "providerStatusCode",
-        "retryAfterSeconds",
+        "requestKind",
+        "outcomeKind",
+        "requestedToolCallCount",
     },
     "gateway.http_request": TRACE_FIELDS
+    | FAILURE_DIAGNOSTIC_FIELDS
     | {
         "method",
         "path",
         "status",
         "durationMs",
         "errorCode",
-        "providerErrorCode",
-        "providerErrorType",
-        "providerStatusCode",
-        "providerRequestId",
-        "retryAfterSeconds",
     },
     "gateway.unhandled_error": TRACE_FIELDS
     | {

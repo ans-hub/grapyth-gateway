@@ -140,6 +140,85 @@ async def test_gateway_correlates_early_errors_and_provider_calls_without_payloa
 
 
 @pytest.mark.anyio
+async def test_http_tool_loop_records_request_and_outcome_kinds(tmp_path: Path) -> None:
+    class ToolLoopProvider(Provider):
+        def __init__(self):
+            self.invocation_count = 0
+
+        def invoke(self, request: ProviderRequest) -> ProviderResult:
+            self.invocation_count += 1
+            output = (
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "tool-call-e2e",
+                        "name": "read_database_sample",
+                        "arguments": "{}",
+                    }
+                ]
+                if self.invocation_count == 1
+                else []
+            )
+            return ProviderResult.from_response(
+                {
+                    "id": f"provider-tool-{self.invocation_count}",
+                    "model": request.payload["model"],
+                    "output": output,
+                    "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                },
+                {"x-request-id": f"provider-tool-request-{self.invocation_count}"},
+                fallback_model=request.fallback_model,
+            )
+
+    app = create_app(GatewaySettings(tmp_path, "admin-secret"), ToolLoopProvider())
+    installation, token = app.state.configuration.create_installation("Tool loop client")
+    app.state.accounting.add_credit(installation.id, Decimal("10"), "tool loop credit")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
+    ) as client:
+        first = await client.post(
+            "/v1/responses",
+            headers={**headers, "Idempotency-Key": "tool-loop-first"},
+            json={
+                "input": [{"role": "user", "content": "read a sample"}],
+                "max_output_tokens": 20,
+            },
+        )
+        second = await client.post(
+            "/v1/responses",
+            headers={**headers, "Idempotency-Key": "tool-loop-second"},
+            json={
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "tool-call-e2e",
+                        "output": "{}",
+                    }
+                ],
+                "max_output_tokens": 20,
+            },
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_call = app.state.accounting.call(first.headers["x-grapyth-gateway-call-id"])
+    second_call = app.state.accounting.call(second.headers["x-grapyth-gateway-call-id"])
+    assert first_call.request_kind == "standard"
+    assert first_call.outcome_kind == "tool_requested"
+    assert first_call.requested_tool_call_count == 1
+    assert second_call.request_kind == "tool_continuation"
+    assert second_call.outcome_kind == "final_response"
+    usage_entries = [
+        item
+        for item in app.state.accounting.list_ledger(installation.id)
+        if item.kind == "ai_usage"
+    ]
+    assert len(usage_entries) == 2
+
+
+@pytest.mark.anyio
 async def test_provider_quota_error_is_safe_and_has_no_retry_guidance(
     tmp_path: Path,
     caplog,
@@ -188,6 +267,8 @@ async def test_provider_quota_error_is_safe_and_has_no_retry_guidance(
         "providerStatusCode": 429,
         "providerRequestId": "req-provider-credit-e2e",
         "gatewayCallId": app.state.accounting.list_calls(installation.id)[0].id,
+        "gatewayPhase": "invoking_provider",
+        "failureKind": "upstream_rejection",
     }
     assert app.state.accounting.list_calls(installation.id)[0].error_code == (
         "credit_balance_exhausted"
@@ -234,9 +315,10 @@ async def test_provider_rate_limit_for_token_count_preserves_retry_after(
             raise ProviderRequestError(
                 error_code="rate_limit_exceeded",
                 error_type="rate_limit_error",
-                status_code=429,
-                request_id="req-provider-rate-e2e",
-                retry_after_seconds=3,
+                    status_code=429,
+                    request_id="req-provider-rate-e2e",
+                    param="input[4].status",
+                    retry_after_seconds=3,
             )
 
     app = create_app(GatewaySettings(tmp_path, "admin-secret"), RateLimitedCountProvider())
@@ -262,7 +344,23 @@ async def test_provider_rate_limit_for_token_count_preserves_retry_after(
     assert response.headers["retry-after"] == "3"
     assert response.json()["error"]["code"] == "provider_rate_limited"
     assert response.json()["error"]["providerErrorCode"] == "rate_limit_exceeded"
-    assert app.state.accounting.list_calls(installation.id) == []
+    assert response.json()["error"]["providerErrorParam"] == "input[4].status"
+    call = app.state.accounting.list_calls(installation.id)[0]
+    assert response.headers["x-grapyth-gateway-call-id"] == call.id
+    assert call.status == "error"
+    assert call.gateway_error_code == "provider_rate_limited"
+    assert call.provider_request_id == "req-provider-rate-e2e"
+    assert call.to_payload()["failure"] == {
+        "phase": "counting_tokens",
+        "kind": "upstream_rejection",
+        "provider": {
+            "code": "rate_limit_exceeded",
+            "type": "rate_limit_error",
+            "statusCode": 429,
+            "param": "input[4].status",
+            "retryAfterSeconds": 3,
+        },
+    }
 
 
 @pytest.mark.anyio

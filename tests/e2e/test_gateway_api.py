@@ -86,6 +86,12 @@ async def test_startup_fails_interrupted_calls_without_replaying_provider_reques
     recovered = second_app.state.accounting.call(running.id)
     assert recovered.status == "error"
     assert recovered.error_code == "gateway_restarted"
+    assert recovered.gateway_error_code == "gateway_restarted"
+    assert recovered.failure is not None
+    assert recovered.failure.to_payload() == {
+        "phase": "unknown",
+        "kind": "gateway_failure",
+    }
     assert recovered.completed_at is not None
 
     async with httpx.AsyncClient(

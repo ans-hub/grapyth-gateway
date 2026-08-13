@@ -16,9 +16,81 @@ MAX_STANDARD_PRICING_INPUT_TOKENS = 272_000
 MAX_PROVIDER_TOOLS = 8
 MAX_PROVIDER_TOOL_SCHEMA_BYTES = 64 * 1024
 PROVIDER_TOOL_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
-ReasoningEffort = Literal["low", "medium", "high"]
-BillingMode = Literal["prepaid", "meter_only"]
-CallStatus = Literal["running", "ok", "error"]
+DIAGNOSTIC_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+PROVIDER_ERROR_PARAM_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\[\]-]*$")
+MAX_PROVIDER_DIAGNOSTIC_LENGTH = 80
+MAX_PROVIDER_ERROR_PARAM_LENGTH = 160
+MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60
+ReasoningEffort = Literal[
+    "low",
+    "medium",
+    "high",
+]
+BillingMode = Literal[
+    "prepaid",
+    "meter_only",
+]
+CallStatus = Literal[
+    "running",
+    "ok",
+    "error",
+]
+CallRequestKind = Literal[
+    "unknown",
+    "standard",
+    "tool_continuation",
+]
+CallOutcomeKind = Literal[
+    "unknown",
+    "final_response",
+    "tool_requested",
+]
+GatewayCallPhase = Literal[
+    "unknown",
+    "checking_budget",
+    "resolving_provider",
+    "counting_tokens",
+    "invoking_provider",
+    "recording_result",
+]
+GatewayFailureKind = Literal[
+    "gateway_rejection",
+    "gateway_failure",
+    "upstream_rejection",
+    "upstream_failure",
+]
+CALL_REQUEST_KINDS = frozenset(
+    {
+        "unknown",
+        "standard",
+        "tool_continuation",
+    }
+)
+CALL_OUTCOME_KINDS = frozenset(
+    {
+        "unknown",
+        "final_response",
+        "tool_requested",
+    }
+)
+GATEWAY_CALL_PHASES = frozenset(
+    {
+        "unknown",
+        "checking_budget",
+        "resolving_provider",
+        "counting_tokens",
+        "invoking_provider",
+        "recording_result",
+    }
+)
+GATEWAY_FAILURE_KINDS = frozenset(
+    {
+        "gateway_rejection",
+        "gateway_failure",
+        "upstream_rejection",
+        "upstream_failure",
+    }
+)
 
 
 def quantize_money(value: Decimal | str | int | float) -> Decimal:
@@ -47,7 +119,12 @@ class PricingRates:
     output: Decimal
 
     def __post_init__(self) -> None:
-        for name in ("input", "cached", "cache_write", "output"):
+        for name in (
+            "input",
+            "cached",
+            "cache_write",
+            "output",
+        ):
             object.__setattr__(self, name, parse_rate(getattr(self, name), f"rates.{name}"))
 
     @classmethod
@@ -171,7 +248,11 @@ class InstallationPolicyAssignment:
     def __post_init__(self) -> None:
         reasoning_effort = str(self.reasoning_effort).lower()
         billing_mode = str(self.billing_mode).lower()
-        if reasoning_effort not in {"low", "medium", "high"}:
+        if reasoning_effort not in {
+            "low",
+            "medium",
+            "high",
+        }:
             raise DomainValidationError(
                 "reasoningEffort must be low, medium, or high"
             )
@@ -323,6 +404,126 @@ class CallStart:
     board_id: str = ""
     chat_id: str = ""
     app_ai_call_id: str = ""
+    request_kind: CallRequestKind = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailure:
+    code: str = ""
+    error_type: str = ""
+    status_code: int | None = None
+    param: str = ""
+    retry_after_seconds: int | None = None
+
+    @classmethod
+    def from_payload(cls, value: Mapping[str, Any]) -> "ProviderFailure":
+        allowed_fields = {
+            "code",
+            "type",
+            "statusCode",
+            "param",
+            "retryAfterSeconds",
+        }
+        if not isinstance(value, Mapping) or set(value).difference(allowed_fields):
+            raise ValueError("Stored provider failure diagnostics are invalid")
+        code = cls._stored_identifier(value.get("code"), MAX_PROVIDER_DIAGNOSTIC_LENGTH)
+        error_type = cls._stored_identifier(
+            value.get("type"),
+            MAX_PROVIDER_DIAGNOSTIC_LENGTH,
+        )
+        param = cls._stored_identifier(
+            value.get("param"),
+            MAX_PROVIDER_ERROR_PARAM_LENGTH,
+            pattern=PROVIDER_ERROR_PARAM_PATTERN,
+        )
+        status_code = value.get("statusCode")
+        if status_code is not None and (
+            isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 100 <= status_code <= 599
+        ):
+            raise ValueError("Stored provider status code is invalid")
+        retry_after_seconds = value.get("retryAfterSeconds")
+        if retry_after_seconds is not None and (
+            isinstance(retry_after_seconds, bool)
+            or not isinstance(retry_after_seconds, int)
+            or not 1 <= retry_after_seconds <= MAX_RETRY_AFTER_SECONDS
+        ):
+            raise ValueError("Stored provider retry delay is invalid")
+        return cls(
+            code=code,
+            error_type=error_type,
+            status_code=status_code,
+            param=param,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    @staticmethod
+    def _stored_identifier(
+        value: Any,
+        max_length: int,
+        *,
+        pattern: re.Pattern[str] = DIAGNOSTIC_IDENTIFIER_PATTERN,
+    ) -> str:
+        if value in (None, ""):
+            return ""
+        if not isinstance(value, str) or len(value) > max_length or not pattern.fullmatch(value):
+            raise ValueError("Stored provider diagnostic is invalid")
+        return value
+
+    def to_payload(self) -> dict[str, str | int]:
+        payload: dict[str, str | int] = {}
+        if self.code:
+            payload["code"] = self.code
+        if self.error_type:
+            payload["type"] = self.error_type
+        if self.status_code is not None:
+            payload["statusCode"] = self.status_code
+        if self.param:
+            payload["param"] = self.param
+        if self.retry_after_seconds is not None:
+            payload["retryAfterSeconds"] = self.retry_after_seconds
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class CallFailure:
+    phase: GatewayCallPhase
+    kind: GatewayFailureKind
+    provider: ProviderFailure = ProviderFailure()
+
+    @classmethod
+    def from_payload(cls, value: Mapping[str, Any]) -> "CallFailure":
+        allowed_fields = {
+            "phase",
+            "kind",
+            "provider",
+        }
+        if not isinstance(value, Mapping) or set(value).difference(allowed_fields):
+            raise ValueError("Stored call failure diagnostics are invalid")
+        phase = value.get("phase")
+        kind = value.get("kind")
+        provider = value.get("provider", {})
+        if (
+            not isinstance(phase, str)
+            or phase not in GATEWAY_CALL_PHASES
+            or not isinstance(kind, str)
+            or kind not in GATEWAY_FAILURE_KINDS
+            or not isinstance(provider, Mapping)
+        ):
+            raise ValueError("Stored call failure diagnostics are invalid")
+        return cls(
+            phase=cast(GatewayCallPhase, phase),
+            kind=cast(GatewayFailureKind, kind),
+            provider=ProviderFailure.from_payload(provider),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"phase": self.phase, "kind": self.kind}
+        provider = self.provider.to_payload()
+        if provider:
+            payload["provider"] = provider
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +541,10 @@ class CallCompletion:
     below_cost: bool = False
     duration_ms: float = 0
     error_code: str = ""
+    gateway_error_code: str = ""
+    failure: CallFailure | None = None
+    outcome_kind: CallOutcomeKind = "unknown"
+    requested_tool_call_count: int = 0
     record_ledger: bool = False
 
 
@@ -357,6 +562,11 @@ class CallRecord:
     below_cost: bool
     duration_ms: float
     error_code: str
+    gateway_error_code: str
+    failure: CallFailure | None
+    request_kind: CallRequestKind
+    outcome_kind: CallOutcomeKind
+    requested_tool_call_count: int
 
 
 def normalize_provider_request(
@@ -414,7 +624,13 @@ def _normalize_provider_tools(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value or len(value) > MAX_PROVIDER_TOOLS:
         raise DomainValidationError(f"tools must contain between 1 and {MAX_PROVIDER_TOOLS} items")
     normalized = []
-    allowed_fields = {"type", "name", "description", "parameters", "strict"}
+    allowed_fields = {
+        "type",
+        "name",
+        "description",
+        "parameters",
+        "strict",
+    }
     for tool in value:
         if not isinstance(tool, Mapping) or set(tool).difference(allowed_fields):
             raise DomainValidationError("Each tool must be a supported function definition")

@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from ..errors import GatewayError
+from ..observability import FAILURE_DIAGNOSTIC_FIELDS
 from .dependencies import trace_fields
 
 
@@ -11,17 +12,9 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(GatewayError)
     async def gateway_error_handler(request: Request, exc: GatewayError):
         request.state.error_code = exc.code
-        for detail_name in (
-            "providerErrorCode",
-            "providerErrorType",
-            "providerStatusCode",
-            "providerRequestId",
-            "retryAfterSeconds",
-        ):
+        for detail_name in FAILURE_DIAGNOSTIC_FIELDS:
             if detail_name in exc.details:
-                request.state.provider_error_details[detail_name] = exc.details[
-                    detail_name
-                ]
+                request.state.failure_diagnostics[detail_name] = exc.details[detail_name]
         body = {
             "error": {
                 "message": str(exc),

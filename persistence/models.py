@@ -6,6 +6,9 @@ from typing import Any
 
 from ..domain import (
     BillingMode,
+    CallFailure,
+    CallOutcomeKind,
+    CallRequestKind,
     CallStatus,
     InstallationPolicyAssignment,
     PricingPlanSpec,
@@ -223,11 +226,18 @@ class CallReadModel:
     below_cost: bool
     duration_ms: float
     error_code: str
+    gateway_error_code: str
+    failure: CallFailure | None
+    request_kind: CallRequestKind
+    outcome_kind: CallOutcomeKind
+    requested_tool_call_count: int
     created_at: str
     completed_at: str | None
 
     def to_payload(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["failure"] = self.failure.to_payload() if self.failure is not None else {}
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

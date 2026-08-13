@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from gateway.domain import (
+    CallFailure,
     CallCompletion,
     InstallationPolicy,
     PricingRates,
@@ -320,3 +321,50 @@ def test_policy_trace_and_completion_contracts_are_immutable_and_snake_case() ->
     assert completion.charged_usd == Decimal("0.1")
     with pytest.raises(FrozenInstanceError):
         policy.model = "changed"  # type: ignore[misc]
+
+
+def test_stored_call_failure_parser_accepts_only_bounded_diagnostics() -> None:
+    failure = CallFailure.from_payload(
+        {
+            "phase": "counting_tokens",
+            "kind": "upstream_rejection",
+            "provider": {
+                "code": "unknown_parameter",
+                "type": "invalid_request_error",
+                "statusCode": 400,
+                "param": "input[4].status",
+            },
+        }
+    )
+
+    assert failure.to_payload()["provider"]["param"] == "input[4].status"
+    with pytest.raises(ValueError, match="Stored provider diagnostic"):
+        CallFailure.from_payload(
+            {
+                "phase": "counting_tokens",
+                "kind": "upstream_rejection",
+                "provider": {"param": "private parameter value with spaces"},
+            }
+        )
+
+
+@pytest.mark.parametrize("provider", [None, [], 0, False, ""])
+def test_stored_call_failure_parser_rejects_non_object_provider(provider: object) -> None:
+    with pytest.raises(ValueError, match="Stored call failure diagnostics"):
+        CallFailure.from_payload(
+            {
+                "phase": "counting_tokens",
+                "kind": "upstream_rejection",
+                "provider": provider,
+            }
+        )
+
+
+def test_stored_call_failure_parser_rejects_non_string_phase() -> None:
+    with pytest.raises(ValueError, match="Stored call failure diagnostics"):
+        CallFailure.from_payload(
+            {
+                "phase": [],
+                "kind": "upstream_rejection",
+            }
+        )

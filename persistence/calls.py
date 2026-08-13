@@ -6,7 +6,17 @@ import uuid
 from decimal import Decimal
 from typing import Callable, cast
 
-from ..domain import CallCompletion, CallStatus, ReasoningEffort, format_money
+from ..domain import (
+    CALL_OUTCOME_KINDS,
+    CALL_REQUEST_KINDS,
+    CallCompletion,
+    CallFailure,
+    CallOutcomeKind,
+    CallRequestKind,
+    CallStatus,
+    ReasoningEffort,
+    format_money,
+)
 from . import billing as billing_repository
 from .models import CallReadModel
 
@@ -17,11 +27,22 @@ CALL_COLUMNS = (
     "cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, provider_request_id, "
     "estimated_provider_cost_usd, provider_cost_usd, charged_usd, margin_usd, pricing_plan_id, "
     "pricing_version, provider_rates_json, billed_rates_json, below_cost, duration_ms, error_code, "
+    "gateway_error_code, failure_json, request_kind, outcome_kind, requested_tool_call_count, "
     "created_at, completed_at"
 )
 
 
 def _map(row: sqlite3.Row) -> CallReadModel:
+    request_kind = str(row["request_kind"])
+    outcome_kind = str(row["outcome_kind"])
+    if request_kind not in CALL_REQUEST_KINDS:
+        raise ValueError("Stored call request kind is invalid")
+    if outcome_kind not in CALL_OUTCOME_KINDS:
+        raise ValueError("Stored call outcome kind is invalid")
+    failure_payload = json.loads(str(row["failure_json"]))
+    if not isinstance(failure_payload, dict):
+        raise ValueError("Stored call failure diagnostics must be an object")
+    failure = CallFailure.from_payload(failure_payload) if failure_payload else None
     return CallReadModel(
         id=str(row["id"]),
         installation_id=str(row["installation_id"]),
@@ -55,6 +76,11 @@ def _map(row: sqlite3.Row) -> CallReadModel:
         below_cost=bool(row["below_cost"]),
         duration_ms=float(row["duration_ms"]),
         error_code=str(row["error_code"]),
+        gateway_error_code=str(row["gateway_error_code"]),
+        failure=failure,
+        request_kind=cast(CallRequestKind, request_kind),
+        outcome_kind=cast(CallOutcomeKind, outcome_kind),
+        requested_tool_call_count=int(row["requested_tool_call_count"]),
         created_at=str(row["created_at"]),
         completed_at=str(row["completed_at"]) if row["completed_at"] is not None else None,
     )
@@ -90,13 +116,14 @@ def insert_running(
     chat_id: str,
     app_ai_call_id: str,
     requested_model: str,
+    request_kind: str,
     created_at: str,
 ) -> None:
     connection.execute(
         "INSERT INTO calls(id, installation_id, idempotency_key, user_id, board_id, chat_id, "
-        "app_ai_call_id, status, requested_model, created_at) VALUES (:id, :installation_id, "
+        "app_ai_call_id, status, requested_model, request_kind, created_at) VALUES (:id, :installation_id, "
         ":idempotency_key, :user_id, :board_id, :chat_id, :app_ai_call_id, 'running', "
-        ":requested_model, :created_at)",
+        ":requested_model, :request_kind, :created_at)",
         {
             "id": call_id,
             "installation_id": installation_id,
@@ -106,6 +133,7 @@ def insert_running(
             "chat_id": chat_id,
             "app_ai_call_id": app_ai_call_id,
             "requested_model": requested_model,
+            "request_kind": request_kind,
             "created_at": created_at,
         },
     )
@@ -123,10 +151,21 @@ def find_idempotent(
 
 
 def fail_running(connection: sqlite3.Connection, *, completed_at: str) -> int:
+    failure_json = json.dumps(
+        CallFailure(
+            phase="unknown",
+            kind="gateway_failure",
+        ).to_payload(),
+        separators=(",", ":"),
+    )
     result = connection.execute(
         "UPDATE calls SET status='error', error_code='gateway_restarted', "
+        "gateway_error_code='gateway_restarted', failure_json=:failure_json, "
         "completed_at=:completed_at WHERE status='running'",
-        {"completed_at": completed_at},
+        {
+            "failure_json": failure_json,
+            "completed_at": completed_at,
+        },
     )
     return max(0, result.rowcount)
 
@@ -161,6 +200,8 @@ def complete(
         "pricing_plan_id=:pricing_plan_id, pricing_version=:pricing_version, "
         "provider_rates_json=:provider_rates_json, billed_rates_json=:billed_rates_json, "
         "below_cost=:below_cost, duration_ms=:duration_ms, error_code=:error_code, "
+        "gateway_error_code=:gateway_error_code, failure_json=:failure_json, "
+        "outcome_kind=:outcome_kind, requested_tool_call_count=:requested_tool_call_count, "
         "completed_at=:completed_at WHERE id=:call_id",
         {
             "call_id": value.call_id,
@@ -190,6 +231,14 @@ def complete(
             "below_cost": int(value.below_cost),
             "duration_ms": value.duration_ms,
             "error_code": value.error_code[:160],
+            "gateway_error_code": value.gateway_error_code[:160],
+            "failure_json": json.dumps(
+                value.failure.to_payload() if value.failure is not None else {},
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ),
+            "outcome_kind": value.outcome_kind,
+            "requested_tool_call_count": value.requested_tool_call_count,
             "completed_at": completed_at,
         },
     )

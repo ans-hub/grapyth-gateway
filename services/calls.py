@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Protocol
 
 from ..domain import (
     CallCompletion,
+    CallFailure,
+    CallOutcomeKind,
     CallRecord,
+    CallRequestKind,
     CallStart,
+    GatewayCallPhase,
+    GatewayFailureKind,
     GatewayLimits,
     InstallationPolicy,
     InstallationPrincipal,
     MAX_STANDARD_PRICING_INPUT_TOKENS,
+    ProviderFailure,
     ProviderRequest,
     TraceContext,
     UserBudget,
@@ -24,7 +31,7 @@ from ..domain import (
     worst_case_cost,
 )
 from ..errors import DomainValidationError, GatewayError, IdempotencyConflict
-from ..observability import emit_structured_event
+from ..observability import PROVIDER_DIAGNOSTIC_FIELDS, emit_structured_event
 from ..providers.base import ProviderPort, ProviderRequestError, ProviderSelector
 from .admission import AdmissionController
 
@@ -96,17 +103,38 @@ class ManagedCallOrchestrator:
 
         self.admission.enforce_rate_limit(policy.installation_id)
         with self.admission.installation_slot(policy.installation_id):
-            provider = self._resolve_provider(policy)
-            input_tokens = self._count_input_tokens(provider, policy, request_payload)
-            reserve = self._check_budgets(
+            call = self._begin_call(
                 policy,
-                input_tokens,
-                request_payload["max_output_tokens"],
-                trace.end_user_id,
+                idempotency_key,
+                requested_model,
+                trace,
+                self._request_kind(request_payload),
             )
-            call = self._begin_call(policy, idempotency_key, requested_model, trace)
             started = time.perf_counter()
+            phase: GatewayCallPhase = "checking_budget"
             try:
+                self._preflight_budgets(
+                    policy,
+                    request_payload["max_output_tokens"],
+                    trace.end_user_id,
+                )
+                phase = "resolving_provider"
+                provider = self._resolve_provider(policy)
+                phase = "counting_tokens"
+                input_tokens = self._count_input_tokens(
+                    provider,
+                    policy,
+                    request_payload,
+                    call.id,
+                )
+                phase = "checking_budget"
+                reserve = self._check_budgets(
+                    policy,
+                    input_tokens,
+                    request_payload["max_output_tokens"],
+                    trace.end_user_id,
+                )
+                phase = "invoking_provider"
                 provider_result = provider.invoke(
                     ProviderRequest(
                         payload=request_payload,
@@ -114,6 +142,7 @@ class ManagedCallOrchestrator:
                         fallback_model=policy.model,
                     )
                 )
+                phase = "recording_result"
                 provider_cost = usage_cost(
                     policy.pricing.provider_rates, provider_result.usage
                 )
@@ -122,6 +151,9 @@ class ManagedCallOrchestrator:
                     reserve,
                 )
                 margin = quantize_money(billed_cost - provider_cost)
+                outcome_kind, requested_tool_call_count = self._response_outcome(
+                    provider_result.response
+                )
                 completed = self.accounting.complete_call(
                     CallCompletion(
                         call_id=call.id,
@@ -136,17 +168,16 @@ class ManagedCallOrchestrator:
                         margin_usd=margin,
                         below_cost=policy.pricing.below_cost or margin < 0,
                         duration_ms=self._duration_ms(started),
+                        outcome_kind=outcome_kind,
+                        requested_tool_call_count=requested_tool_call_count,
                         record_ledger=policy.billing_mode == "prepaid",
                     )
                 )
-            except GatewayError:
-                raise
-            except Exception as exc:
-                gateway_error = self._provider_gateway_error(
+            except GatewayError as exc:
+                gateway_error, failure_kind = self._finalize_gateway_error(
                     exc,
-                    fallback_code="provider_error",
-                    fallback_message="The AI provider request failed",
-                    gateway_call_id=call.id,
+                    call.id,
+                    phase,
                 )
                 self._complete_error(
                     call,
@@ -154,6 +185,37 @@ class ManagedCallOrchestrator:
                     trace,
                     started,
                     gateway_error,
+                    phase,
+                    failure_kind,
+                )
+                raise gateway_error from exc
+            except Exception as exc:
+                gateway_error = (
+                    self._provider_gateway_error(
+                        exc,
+                        fallback_code="provider_error",
+                        fallback_message="The AI provider request failed",
+                    )
+                    if phase == "invoking_provider"
+                    else GatewayError(
+                        500,
+                        "gateway_internal_error",
+                        "The Gateway could not complete the AI request",
+                    )
+                )
+                gateway_error, failure_kind = self._finalize_gateway_error(
+                    gateway_error,
+                    call.id,
+                    phase,
+                )
+                self._complete_error(
+                    call,
+                    policy,
+                    trace,
+                    started,
+                    gateway_error,
+                    phase,
+                    failure_kind,
                 )
                 raise gateway_error from exc
 
@@ -204,6 +266,19 @@ class ManagedCallOrchestrator:
         except DomainValidationError as exc:
             raise GatewayError(400, exc.code, str(exc)) from exc
 
+    def _preflight_budgets(
+        self,
+        policy: InstallationPolicy,
+        max_output_tokens: int,
+        user_id: str,
+    ) -> None:
+        minimum_required = worst_case_cost(
+            0,
+            max_output_tokens,
+            policy.pricing.billed_rates,
+        )
+        self._enforce_budgets(policy, minimum_required, user_id)
+
     def _check_budgets(
         self,
         policy: InstallationPolicy,
@@ -226,6 +301,15 @@ class ManagedCallOrchestrator:
             max_output_tokens,
             policy.pricing.billed_rates,
         )
+        self._enforce_budgets(policy, required, user_id)
+        return required
+
+    def _enforce_budgets(
+        self,
+        policy: InstallationPolicy,
+        required: Decimal,
+        user_id: str,
+    ) -> None:
         if user_id:
             budget = self.accounting.load_user_budget(policy.installation_id, user_id)
             if budget.monthly_limit_usd is not None:
@@ -256,19 +340,19 @@ class ManagedCallOrchestrator:
                         "requiredReserveUsd": format_money(required),
                     },
                 )
-        return required
 
     @staticmethod
     def _count_input_tokens(
         provider: ProviderPort,
         policy: InstallationPolicy,
         request_payload: dict[str, Any],
+        gateway_call_id: str,
     ) -> int:
         try:
             input_tokens = provider.count_input_tokens(
                 ProviderRequest(
                     payload=request_payload,
-                    gateway_call_id="",
+                    gateway_call_id=gateway_call_id,
                     fallback_model=policy.model,
                 )
             )
@@ -281,7 +365,7 @@ class ManagedCallOrchestrator:
             raise ManagedCallOrchestrator._provider_gateway_error(
                 exc,
                 fallback_code="provider_token_count_error",
-                fallback_message="The AI provider could not count request tokens",
+                fallback_message="The AI request could not be processed",
             ) from exc
 
     @staticmethod
@@ -290,11 +374,8 @@ class ManagedCallOrchestrator:
         *,
         fallback_code: str,
         fallback_message: str,
-        gateway_call_id: str = "",
     ) -> GatewayError:
         details = ManagedCallOrchestrator._provider_error_details(error)
-        if gateway_call_id:
-            details["gatewayCallId"] = gateway_call_id
         if isinstance(error, ProviderRequestError):
             if (
                 error.error_code.lower() in PROVIDER_QUOTA_ERROR_CODES
@@ -329,6 +410,8 @@ class ManagedCallOrchestrator:
             details["providerStatusCode"] = error.status_code
         if error.request_id:
             details["providerRequestId"] = error.request_id
+        if error.param:
+            details["providerErrorParam"] = error.param
         if error.retry_after_seconds is not None:
             details["retryAfterSeconds"] = error.retry_after_seconds
         return details
@@ -350,6 +433,7 @@ class ManagedCallOrchestrator:
         idempotency_key: str,
         requested_model: str,
         trace: TraceContext,
+        request_kind: CallRequestKind,
     ) -> CallRecord:
         try:
             return self.accounting.begin_call(
@@ -361,6 +445,7 @@ class ManagedCallOrchestrator:
                     board_id=trace.board_id,
                     chat_id=trace.chat_id,
                     app_ai_call_id=trace.app_ai_call_id,
+                    request_kind=request_kind,
                 )
             )
         except IdempotencyConflict as exc:
@@ -390,31 +475,78 @@ class ManagedCallOrchestrator:
         trace: TraceContext,
         started: float,
         gateway_error: GatewayError,
+        phase: GatewayCallPhase,
+        failure_kind: GatewayFailureKind,
     ) -> None:
         diagnostics = {
             key: value
             for key, value in gateway_error.details.items()
-            if key
-            in {
-                "providerErrorCode",
-                "providerErrorType",
-                "providerStatusCode",
-                "providerRequestId",
-                "retryAfterSeconds",
-            }
+            if key in PROVIDER_DIAGNOSTIC_FIELDS
         }
-        provider_error_code = str(diagnostics["providerErrorCode"])
-        self.accounting.complete_call(
-            CallCompletion(
-                call_id=call.id,
-                status="error",
-                resolved_model=policy.model,
-                reasoning_effort=policy.reasoning_effort,
-                pricing=policy.pricing,
-                duration_ms=self._duration_ms(started),
-                error_code=provider_error_code,
+        provider_error_code = str(diagnostics.get("providerErrorCode") or "")
+        provider_status = diagnostics.get("providerStatusCode")
+        retry_after_seconds = diagnostics.get("retryAfterSeconds")
+        try:
+            self.accounting.complete_call(
+                CallCompletion(
+                    call_id=call.id,
+                    status="error",
+                    resolved_model=policy.model,
+                    reasoning_effort=policy.reasoning_effort,
+                    pricing=policy.pricing,
+                    duration_ms=self._duration_ms(started),
+                    error_code=provider_error_code or gateway_error.code,
+                    gateway_error_code=gateway_error.code,
+                    provider_request_id=str(diagnostics.get("providerRequestId") or ""),
+                    failure=CallFailure(
+                        phase=phase,
+                        kind=failure_kind,
+                        provider=ProviderFailure(
+                            code=provider_error_code,
+                            error_type=str(diagnostics.get("providerErrorType") or ""),
+                            status_code=(
+                                provider_status
+                                if not isinstance(provider_status, bool)
+                                and isinstance(provider_status, int)
+                                else None
+                            ),
+                            param=str(diagnostics.get("providerErrorParam") or ""),
+                            retry_after_seconds=(
+                                retry_after_seconds
+                                if not isinstance(retry_after_seconds, bool)
+                                and isinstance(retry_after_seconds, int)
+                                else None
+                            ),
+                        ),
+                    ),
+                )
             )
-        )
+        except Exception as exc:
+            emit_structured_event(
+                self.logger,
+                event="gateway.ai_call",
+                level="error",
+                fields={
+                    **trace.to_log_fields(),
+                    "gatewayCallId": call.id,
+                    "installationId": policy.installation_id,
+                    "status": "error",
+                    "errorCode": "gateway_call_recording_failed",
+                    "gatewayPhase": "recording_result",
+                    "failureKind": "gateway_failure",
+                    "requestKind": call.request_kind,
+                },
+            )
+            raise GatewayError(
+                500,
+                "gateway_call_recording_failed",
+                "The Gateway could not record the AI call result",
+                details={
+                    "gatewayCallId": call.id,
+                    "gatewayPhase": "recording_result",
+                    "failureKind": "gateway_failure",
+                },
+            ) from exc
         emit_structured_event(
             self.logger,
             event="gateway.ai_call",
@@ -425,8 +557,76 @@ class ManagedCallOrchestrator:
                 "installationId": policy.installation_id,
                 "status": "error",
                 "errorCode": gateway_error.code,
+                "gatewayPhase": phase,
+                "failureKind": failure_kind,
+                "requestKind": call.request_kind,
                 **diagnostics,
             },
+        )
+
+    @staticmethod
+    def _finalize_gateway_error(
+        error: GatewayError,
+        gateway_call_id: str,
+        phase: GatewayCallPhase,
+    ) -> tuple[GatewayError, GatewayFailureKind]:
+        provider_status = error.details.get("providerStatusCode")
+        provider_failure = phase in {"counting_tokens", "invoking_provider"} and bool(
+            error.details.get("providerErrorCode")
+        )
+        if provider_failure:
+            failure_kind: GatewayFailureKind = (
+                "upstream_rejection"
+                if isinstance(provider_status, int) and 400 <= provider_status < 500
+                else "upstream_failure"
+            )
+        else:
+            failure_kind = (
+                "gateway_rejection" if error.status_code < 500 else "gateway_failure"
+            )
+        return (
+            GatewayError(
+                error.status_code,
+                error.code,
+                str(error),
+                details={
+                    **error.details,
+                    "gatewayCallId": gateway_call_id,
+                    "gatewayPhase": phase,
+                    "failureKind": failure_kind,
+                },
+            ),
+            failure_kind,
+        )
+
+    @staticmethod
+    def _request_kind(request_payload: Mapping[str, Any]) -> CallRequestKind:
+        request_input = request_payload.get("input")
+        if isinstance(request_input, list) and any(
+            isinstance(item, Mapping) and item.get("type") == "function_call_output"
+            for item in request_input
+        ):
+            return "tool_continuation"
+        return "standard"
+
+    @staticmethod
+    def _response_outcome(
+        response: Mapping[str, Any],
+    ) -> tuple[CallOutcomeKind, int]:
+        output = response.get("output")
+        tool_call_count = (
+            sum(
+                1
+                for item in output
+                if isinstance(item, Mapping) and item.get("type") == "function_call"
+            )
+            if isinstance(output, list)
+            else 0
+        )
+        return (
+            ("tool_requested", tool_call_count)
+            if tool_call_count
+            else ("final_response", 0)
         )
 
     def _log_success(
@@ -455,6 +655,9 @@ class ManagedCallOrchestrator:
                 "belowCost": completed.below_cost,
                 "durationMs": completed.duration_ms,
                 "providerRequestId": completed.provider_request_id,
+                "requestKind": completed.request_kind,
+                "outcomeKind": completed.outcome_kind,
+                "requestedToolCallCount": completed.requested_tool_call_count,
             },
         )
 

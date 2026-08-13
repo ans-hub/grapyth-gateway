@@ -3,13 +3,19 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
-from ..domain import InstallationPolicy, ProviderRequest, ProviderResult
+from ..domain import (
+    DIAGNOSTIC_IDENTIFIER_PATTERN,
+    MAX_PROVIDER_DIAGNOSTIC_LENGTH,
+    MAX_PROVIDER_ERROR_PARAM_LENGTH,
+    MAX_RETRY_AFTER_SECONDS,
+    PROVIDER_ERROR_PARAM_PATTERN,
+    InstallationPolicy,
+    ProviderRequest,
+    ProviderResult,
+)
 
 
-DIAGNOSTIC_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-MAX_PROVIDER_DIAGNOSTIC_LENGTH = 80
 MAX_PROVIDER_REQUEST_ID_LENGTH = 200
-MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60
 
 
 class ProviderRequestError(RuntimeError):
@@ -22,6 +28,7 @@ class ProviderRequestError(RuntimeError):
         error_type: str = "",
         status_code: int | None = None,
         request_id: str = "",
+        param: str = "",
         retry_after_seconds: int | None = None,
     ):
         super().__init__("The AI provider request failed")
@@ -47,6 +54,12 @@ class ProviderRequestError(RuntimeError):
             "",
             max_length=MAX_PROVIDER_REQUEST_ID_LENGTH,
         )
+        self.param = self._safe_identifier(
+            param,
+            "",
+            max_length=MAX_PROVIDER_ERROR_PARAM_LENGTH,
+            pattern=PROVIDER_ERROR_PARAM_PATTERN,
+        )
         self.retry_after_seconds = (
             retry_after_seconds
             if not isinstance(retry_after_seconds, bool)
@@ -61,12 +74,13 @@ class ProviderRequestError(RuntimeError):
         fallback: str,
         *,
         max_length: int,
+        pattern: re.Pattern[str] = DIAGNOSTIC_IDENTIFIER_PATTERN,
     ) -> str:
         normalized = str(value or "").strip()
         return (
             normalized
             if len(normalized) <= max_length
-            and DIAGNOSTIC_IDENTIFIER_PATTERN.fullmatch(normalized)
+            and pattern.fullmatch(normalized)
             else fallback
         )
 

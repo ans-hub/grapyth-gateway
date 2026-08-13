@@ -8,7 +8,7 @@ import pytest
 
 from gateway.database import GatewayDatabase
 from gateway.config import DEFAULT_MODEL, DEFAULT_PRICING_VERSION, DEFAULT_RATES
-from gateway.domain import PricingPlanSpec
+from gateway.domain import CallStart, PricingPlanSpec
 from gateway.persistence import audit as audit_repository
 from gateway.stores import (
     GatewayAccountingStore,
@@ -88,6 +88,44 @@ def test_repository_read_models_are_immutable(tmp_path: Path) -> None:
 
     with pytest.raises(FrozenInstanceError):
         record.action = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("column", "stored_value", "message"),
+    [
+        ("request_kind", "private", "Stored call request kind is invalid"),
+        ("outcome_kind", "private", "Stored call outcome kind is invalid"),
+        ("failure_json", "[]", "Stored call failure diagnostics must be an object"),
+    ],
+)
+def test_call_reads_validate_diagnostics_at_the_persistence_boundary(
+    tmp_path: Path,
+    column: str,
+    stored_value: str,
+    message: str,
+) -> None:
+    database, _credentials, accounting = configured_stores(tmp_path)
+    configuration = GatewayConfigurationStore(database)
+    installation, _token = configuration.create_installation("Diagnostics client")
+    call = accounting.begin_call(
+        CallStart(
+            installation_id=installation.id,
+            idempotency_key="diagnostics-boundary",
+            requested_model=DEFAULT_MODEL,
+        )
+    )
+    assert column in {"request_kind", "outcome_kind", "failure_json"}
+    with database.transaction() as connection:
+        connection.execute(
+            f"UPDATE calls SET {column}=:stored_value WHERE id=:call_id",
+            {
+                "stored_value": stored_value,
+                "call_id": call.id,
+            },
+        )
+
+    with pytest.raises(ValueError, match=message):
+        accounting.list_calls(installation.id)
 
 
 def test_runtime_persistence_has_no_outward_select_star() -> None:

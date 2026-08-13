@@ -114,9 +114,11 @@ class OpenAIProvider:
         )
         provider_code = ""
         provider_type = ""
+        provider_param = ""
         if isinstance(provider_error, Mapping):
             provider_code = str(provider_error.get("code") or "").strip()
             provider_type = str(provider_error.get("type") or "").strip()
+            provider_param = str(provider_error.get("param") or "").strip()
 
         response = getattr(error, "response", None)
         headers = getattr(response, "headers", None)
@@ -139,6 +141,7 @@ class OpenAIProvider:
             error_type=provider_type,
             status_code=status_code,
             request_id=request_id,
+            param=provider_param,
             retry_after_seconds=retry_after_seconds,
         )
 

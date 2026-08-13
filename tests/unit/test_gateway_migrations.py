@@ -24,6 +24,9 @@ INITIAL_MIGRATION_CHECKSUM = "bb25d5d3a5a843ce468606063daf02c207d737f9198605710e
 MANAGED_PRICING_MIGRATION_CHECKSUM = (
     "025553f379e3db1964d359185c39761f97328328f64083f1d417f8724bbe9883"
 )
+CALL_DIAGNOSTICS_MIGRATION_CHECKSUM = (
+    "4604a0d239afdeb63198b9ba0fbab9a143962cc9643d9a27c97ffece63cde8f8"
+)
 
 
 def migration_rows(database: GatewayDatabase) -> list[sqlite3.Row]:
@@ -42,6 +45,7 @@ def test_fresh_database_reaches_the_versioned_schema_with_required_objects(tmp_p
     assert [(row["version"], row["name"], row["checksum"]) for row in rows] == [
         (1, "initial_gateway_schema", INITIAL_MIGRATION_CHECKSUM),
         (2, "update_managed_terra_pricing", MANAGED_PRICING_MIGRATION_CHECKSUM),
+        (3, "add_call_diagnostics", CALL_DIAGNOSTICS_MIGRATION_CHECKSUM),
     ]
     with database.connect() as connection:
         assert schema_fingerprint(connection) == CURRENT_SCHEMA_FINGERPRINT
@@ -96,6 +100,32 @@ def test_initialization_is_a_no_op_after_the_migration_is_recorded(tmp_path: Pat
     database.initialize()
 
     assert [tuple(row) for row in migration_rows(database)] == before
+
+
+def test_call_diagnostics_migration_preserves_existing_calls(tmp_path: Path) -> None:
+    path = tmp_path / "call-diagnostics-upgrade.db"
+    MigrationRunner(MIGRATIONS[:2]).initialize(lambda: connect_sqlite(path))
+    with connect_sqlite(path) as connection:
+        connection.execute(
+            "INSERT INTO installations(id,name,token_hash,token_hint,created_at,updated_at) "
+            "VALUES ('inst-upgrade','Upgrade','hash-upgrade','hint','2026-01-01T00:00:00Z',"
+            "'2026-01-01T00:00:00Z')"
+        )
+        connection.execute(
+            "INSERT INTO calls(id,installation_id,idempotency_key,status,requested_model,error_code,created_at) "
+            "VALUES ('call-upgrade','inst-upgrade','key-upgrade','error','model','RateLimitError',"
+            "'2026-01-01T00:00:00Z')"
+        )
+        connection.commit()
+
+    GatewayDatabase(path).initialize()
+
+    with connect_sqlite(path) as connection:
+        row = connection.execute(
+            "SELECT error_code,gateway_error_code,failure_json,request_kind,outcome_kind,"
+            "requested_tool_call_count FROM calls WHERE id='call-upgrade'"
+        ).fetchone()
+    assert tuple(row) == ("RateLimitError", "", "{}", "unknown", "unknown", 0)
 
 
 def test_managed_pricing_migration_updates_only_the_untouched_builtin_plan(
@@ -318,7 +348,7 @@ def test_newer_and_modified_migration_history_are_rejected(tmp_path: Path) -> No
     with newer.connect() as connection:
         connection.execute(
             "INSERT INTO schema_migrations(version,name,checksum,applied_at) "
-            "VALUES (3,'future_schema','future','2026-01-01T00:00:00Z')"
+            "VALUES (4,'future_schema','future','2026-01-01T00:00:00Z')"
         )
         connection.commit()
     with pytest.raises(NewerSchemaError, match="newer than this binary"):
@@ -393,6 +423,7 @@ def test_concurrent_initialization_records_each_migration_once(tmp_path: Path) -
 
     assert results == [None, None]
     rows = migration_rows(database)
-    assert len(rows) == len(MIGRATIONS) == 2
+    assert len(rows) == len(MIGRATIONS) == 3
     assert rows[0]["checksum"] == INITIAL_MIGRATION_CHECKSUM
     assert rows[1]["checksum"] == MANAGED_PRICING_MIGRATION_CHECKSUM
+    assert rows[2]["checksum"] == CALL_DIAGNOSTICS_MIGRATION_CHECKSUM

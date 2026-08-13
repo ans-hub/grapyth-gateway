@@ -148,7 +148,7 @@ def test_typed_orchestrator_keeps_the_managed_call_steps_in_order(
     class TypedProvider:
         def count_input_tokens(self, request: ProviderRequest) -> int:
             events.append("count_input_tokens")
-            assert request.gateway_call_id == ""
+            assert request.gateway_call_id.startswith("gw-call-")
             return 10
 
         def invoke(self, request: ProviderRequest) -> ProviderResult:
@@ -213,8 +213,8 @@ def test_typed_orchestrator_keeps_the_managed_call_steps_in_order(
         "load_gateway_limits",
         "rate_limit",
         "slot_enter",
-        "count_input_tokens",
         "begin_call",
+        "count_input_tokens",
         "provider",
         "complete_call",
         "balance",
@@ -275,6 +275,67 @@ def test_gateway_forces_no_provider_storage_and_records_only_metering(tmp_path: 
     assert "confidential board content" not in stored
 
 
+def test_gateway_records_tool_request_and_continuation_as_two_ai_calls(tmp_path: Path) -> None:
+    class ToolLoopProvider(RecordingProvider):
+        def __init__(self):
+            super().__init__()
+            self.invocation_count = 0
+
+        def invoke(self, request: ProviderRequest) -> ProviderResult:
+            self.invocation_count += 1
+            result = super().invoke(request)
+            if self.invocation_count == 1:
+                result.response["output"] = [
+                    {
+                        "type": "function_call",
+                        "call_id": "tool-call-one",
+                        "name": "read_database_sample",
+                        "arguments": "{}",
+                    }
+                ]
+            return result
+
+    _database, configuration, accounting, _plan = configured_stores(tmp_path)
+    installation, token = configuration.create_installation("Tool flow")
+    accounting.add_credit(installation.id, Decimal("10"), "tool flow credit")
+    provider = ToolLoopProvider()
+    service = GatewayService(
+        configuration,
+        accounting,
+        FixedProviderSelector(provider),
+    )
+    principal = configuration.authenticate_principal(token)
+
+    _first_response, first_headers = service.execute(
+        principal,
+        "tool-flow-first",
+        request_payload(),
+    )
+    continuation = request_payload()
+    continuation["input"] = [
+        {
+            "type": "function_call_output",
+            "call_id": "tool-call-one",
+            "output": "{}",
+        }
+    ]
+    _second_response, second_headers = service.execute(
+        principal,
+        "tool-flow-second",
+        continuation,
+    )
+
+    first_call = accounting.call(first_headers["x-grapyth-gateway-call-id"])
+    second_call = accounting.call(second_headers["x-grapyth-gateway-call-id"])
+    assert first_call.request_kind == "standard"
+    assert first_call.outcome_kind == "tool_requested"
+    assert first_call.requested_tool_call_count == 1
+    assert second_call.request_kind == "tool_continuation"
+    assert second_call.outcome_kind == "final_response"
+    assert second_call.requested_tool_call_count == 0
+    assert len([row for row in accounting.list_ledger(installation.id) if row.kind == "ai_usage"]) == 2
+
+
 def test_gateway_setting_caps_output_immediately_without_restart(tmp_path: Path) -> None:
     _database, configuration, _accounting, service, provider, installation = make_service(
         tmp_path
@@ -328,6 +389,14 @@ def test_gateway_ignores_client_model_and_enforces_assigned_credit_policy(tmp_pa
         service.execute(installation, "unknown", unknown)
     assert credit_error.value.status_code == 402
     assert credit_error.value.code == "insufficient_credit"
+    assert provider.token_count_requests == []
+    rejected_call = accounting.list_calls(installation.id)[0]
+    rejected_record = accounting.load_call_record(rejected_call.id)
+    assert rejected_call.status == "error"
+    assert rejected_call.gateway_error_code == "insufficient_credit"
+    assert rejected_record.failure is not None
+    assert rejected_record.failure.phase == "checking_budget"
+    assert rejected_record.failure.kind == "gateway_rejection"
     accounting.add_credit(installation.id, Decimal("10"), "paid")
     service.execute(installation, "unknown-paid", unknown)
     assert provider.payloads[0]["model"] == "gpt-5.6-terra"
@@ -340,7 +409,7 @@ def test_gateway_ignores_client_model_and_enforces_assigned_credit_policy(tmp_pa
     )
 
 
-def test_exact_input_count_limit_is_enforced_before_call_creation(tmp_path: Path) -> None:
+def test_exact_input_count_limit_is_recorded_without_invoking_the_provider(tmp_path: Path) -> None:
     _database, configuration, accounting, _plan = configured_stores(tmp_path)
     installation, token = configuration.create_installation("Input boundary")
     accounting.add_credit(installation.id, Decimal("10"), "boundary credit")
@@ -361,12 +430,14 @@ def test_exact_input_count_limit_is_enforced_before_call_creation(tmp_path: Path
 
     assert rejected.value.status_code == 400
     assert rejected.value.code == "input_limit_exceeded"
-    assert rejected.value.details == {
-        "inputTokens": MAX_STANDARD_PRICING_INPUT_TOKENS + 1,
-        "maxInputTokens": MAX_STANDARD_PRICING_INPUT_TOKENS,
-    }
+    assert rejected.value.details["inputTokens"] == MAX_STANDARD_PRICING_INPUT_TOKENS + 1
+    assert rejected.value.details["maxInputTokens"] == MAX_STANDARD_PRICING_INPUT_TOKENS
+    assert rejected.value.details["gatewayPhase"] == "checking_budget"
+    assert rejected.value.details["failureKind"] == "gateway_rejection"
     assert provider.payloads == []
-    assert accounting.list_calls(installation.id) == []
+    over_limit_call = accounting.list_calls(installation.id)[0]
+    assert over_limit_call.status == "error"
+    assert over_limit_call.gateway_error_code == "input_limit_exceeded"
 
     provider.input_token_count = MAX_STANDARD_PRICING_INPUT_TOKENS
     service.execute(
@@ -375,7 +446,7 @@ def test_exact_input_count_limit_is_enforced_before_call_creation(tmp_path: Path
         request_payload(),
     )
     assert len(provider.payloads) == 1
-    assert len(accounting.list_calls(installation.id)) == 1
+    assert len(accounting.list_calls(installation.id)) == 2
 
 
 def test_provider_token_count_failure_is_safe_and_not_billable(tmp_path: Path) -> None:
@@ -403,9 +474,16 @@ def test_provider_token_count_failure_is_safe_and_not_billable(tmp_path: Path) -
 
     assert failed.value.status_code == 502
     assert failed.value.code == "provider_token_count_error"
-    assert failed.value.details == {"providerErrorCode": "TimeoutError"}
+    assert failed.value.details["providerErrorCode"] == "TimeoutError"
+    assert failed.value.details["gatewayPhase"] == "counting_tokens"
+    assert failed.value.details["failureKind"] == "upstream_failure"
     assert provider.payloads == []
-    assert accounting.list_calls(installation.id) == []
+    call = accounting.list_calls(installation.id)[0]
+    call_record = accounting.load_call_record(call.id)
+    assert call.status == "error"
+    assert call.gateway_error_code == "provider_token_count_error"
+    assert call_record.failure is not None
+    assert call_record.failure.provider.code == "TimeoutError"
     assert accounting.balance(installation.id) == Decimal("10.000000")
 
 
@@ -445,8 +523,13 @@ def test_provider_token_count_rate_limit_preserves_retry_guidance(tmp_path: Path
         "providerStatusCode": 429,
         "providerRequestId": "req-token-count-rate-limit",
         "retryAfterSeconds": 7,
+        "gatewayCallId": accounting.list_calls(installation.id)[0].id,
+        "gatewayPhase": "counting_tokens",
+        "failureKind": "upstream_rejection",
     }
-    assert accounting.list_calls(installation.id) == []
+    call = accounting.list_calls(installation.id)[0]
+    assert call.gateway_error_code == "provider_rate_limited"
+    assert call.provider_request_id == "req-token-count-rate-limit"
     assert accounting.balance(installation.id) == Decimal("10.000000")
 
 
@@ -549,9 +632,14 @@ def test_provider_failure_records_error_without_charging_credit(tmp_path: Path) 
     assert duplicate.value.details["providerErrorCode"] == "TimeoutError"
     assert provider.calls == 1
     calls = accounting.list_calls(installation.id)
+    failed_record = accounting.load_call_record(calls[0].id)
     assert len(calls) == 1
     assert calls[0].status == "error"
     assert calls[0].error_code == "TimeoutError"
+    assert calls[0].gateway_error_code == "provider_error"
+    assert failed_record.failure is not None
+    assert failed_record.failure.phase == "invoking_provider"
+    assert failed_record.failure.kind == "upstream_failure"
     assert calls[0].charged_usd is None
     assert [row.kind for row in accounting.list_ledger(installation.id)] == [
         "manual_credit"
@@ -559,6 +647,46 @@ def test_provider_failure_records_error_without_charging_credit(tmp_path: Path) 
     assert configuration.installation(installation.id).balance_usd == Decimal(
         "10.000000"
     )
+
+
+def test_error_completion_failure_returns_a_safe_recording_error(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    class FailingProvider(RecordingProvider):
+        @staticmethod
+        def invoke(_request: ProviderRequest) -> ProviderResult:
+            raise TimeoutError("private provider failure")
+
+    caplog.set_level(logging.ERROR, logger=LOGGER.name)
+    _database, configuration, accounting, _plan = configured_stores(tmp_path)
+    installation, token = configuration.create_installation("Recording failure")
+    accounting.add_credit(installation.id, Decimal("10"), "recording credit")
+    service = GatewayService(
+        configuration,
+        accounting,
+        FixedProviderSelector(FailingProvider()),
+    )
+    monkeypatch.setattr(
+        accounting,
+        "complete_call",
+        lambda _completion: (_ for _ in ()).throw(OSError("private database failure")),
+    )
+
+    with pytest.raises(GatewayError) as failure:
+        service.execute(
+            configuration.authenticate_principal(token),
+            "recording-failure",
+            request_payload(),
+        )
+
+    assert failure.value.code == "gateway_call_recording_failed"
+    assert failure.value.status_code == 500
+    assert failure.value.details["gatewayPhase"] == "recording_result"
+    assert failure.value.details["failureKind"] == "gateway_failure"
+    assert "private database failure" not in str(failure.value)
+    assert '"errorCode": "gateway_call_recording_failed"' in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -613,13 +741,19 @@ def test_provider_quota_failures_are_distinct_from_a_retryable_rate_limit(
         "providerStatusCode": 429,
         "providerRequestId": "req-provider-credit",
         "gatewayCallId": accounting.list_calls(installation.id)[0].id,
+        "gatewayPhase": "invoking_provider",
+        "failureKind": "upstream_rejection",
     }
     if provider_error_type:
         expected_details["providerErrorType"] = provider_error_type
     assert failed.value.details == expected_details
     call = accounting.list_calls(installation.id)[0]
+    call_record = accounting.load_call_record(call.id)
     assert call.status == "error"
     assert call.error_code == provider_error_code
+    assert call.gateway_error_code == "provider_quota_exceeded"
+    assert call_record.failure is not None
+    assert call_record.failure.kind == "upstream_rejection"
     assert call.charged_usd is None
     assert accounting.balance(installation.id) == Decimal("10.000000")
     rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
@@ -1103,6 +1237,7 @@ def test_openai_adapter_translates_rate_limit_errors_without_exposing_the_body()
             "message": sensitive_message,
             "type": "insufficient_quota",
             "code": "credit_balance_exhausted",
+            "param": "input[4].status",
         },
     )
 
@@ -1132,6 +1267,7 @@ def test_openai_adapter_translates_rate_limit_errors_without_exposing_the_body()
     assert translated.value.error_type == "insufficient_quota"
     assert translated.value.status_code == 429
     assert translated.value.request_id == "req-openai-credit"
+    assert translated.value.param == "input[4].status"
     assert translated.value.retry_after_seconds == 5
     assert sensitive_message not in str(translated.value)
 
@@ -1142,6 +1278,7 @@ def test_provider_request_error_rejects_unsafe_diagnostics() -> None:
         error_type="unsafe/type",
         status_code=True,
         request_id="https://private.example/request",
+        param="unsafe param with private content",
         retry_after_seconds=MAX_RETRY_AFTER_SECONDS + 1,
     )
 
@@ -1150,6 +1287,7 @@ def test_provider_request_error_rejects_unsafe_diagnostics() -> None:
     assert error.error_type == ""
     assert error.status_code is None
     assert error.request_id == ""
+    assert error.param == ""
     assert error.retry_after_seconds is None
 
 

@@ -207,6 +207,15 @@ WHERE name='Default managed pricing'
     AND updated_at=created_at;
 """
 
+CALL_DIAGNOSTICS_SQL = """
+ALTER TABLE calls ADD COLUMN gateway_error_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE calls ADD COLUMN failure_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE calls ADD COLUMN request_kind TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE calls ADD COLUMN outcome_kind TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE calls ADD COLUMN requested_tool_call_count INTEGER NOT NULL DEFAULT 0;
+"""
+
+
 class SchemaCompatibilityError(RuntimeError):
     """The database schema cannot be used safely by this Gateway binary."""
 
@@ -257,6 +266,7 @@ class Migration:
 MIGRATIONS = (
     Migration(1, "initial_gateway_schema", _split_sql(INITIAL_GATEWAY_SQL)),
     Migration(2, "update_managed_terra_pricing", _split_sql(MANAGED_TERRA_PRICING_SQL)),
+    Migration(3, "add_call_diagnostics", _split_sql(CALL_DIAGNOSTICS_SQL)),
 )
 
 
